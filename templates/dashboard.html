@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Trade Monitor</title>
+  <link rel="icon" type="image/png" href="/static/images/solivox-icon.png">
+  <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link href=".././static/css/style.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+<!--<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">-->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <style>
+    :root {
+      --bg-dark: #1a1a2e;
+      --bg-card: #2d2b4f;
+      --bg-button: #4a3aff;
+      --text-primary: #ffffff;
+      --text-secondary: #b8b8d1;
+      --accent-green: #00c853;
+      --accent-red: #ff3d00;
+      --accent-blue: #2979ff;
+    }
+
+    body {
+      font-family: 'Arial', sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-primary);
+      margin: 0;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .header-dashboard {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .token-header {
+      background-color: var(--bg-card);
+      padding: 15px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    .token-info {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .token-name {
+      font-size: 1.5rem;
+      font-weight: bold;
+    }
+
+    /*.copy-btn-dashboard {*/
+    /*  background-color: var(--bg-button);*/
+    /*  color: white;*/
+    /*  border: none;*/
+    /*  padding: 5px 10px;*/
+    /*  border-radius: 4px;*/
+    /*  cursor: pointer;*/
+    /*  margin-left: 10px;*/
+    /*}*/
+
+    .time-elapsed {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
+
+    .chart-container {
+      background-color: var(--bg-card);
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 20px;
+      height: 300px;
+    }
+
+    .quick-sell-buttons {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .time-btn {
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      border: 1px solid var(--text-secondary);
+      padding: 8px 15px;
+      border-radius: 20px;
+      cursor: pointer;
+    }
+
+    .time-btn.active {
+      background-color: var(--bg-button);
+      border-color: var(--bg-button);
+    }
+
+    .sell-section {
+      display: flex;
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+
+    .sell-btn {
+      background-color: var(--accent-red);
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    .stats-container {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+
+    .stat-card {
+      background-color: var(--bg-card);
+      padding: 15px;
+      border-radius: 8px;
+    }
+
+    .stat-label {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      margin-bottom: 5px;
+    }
+
+    .stat-value {
+      font-size: 1.2rem;
+      font-weight: bold;
+    }
+
+    .profit {
+      color: var(--accent-green);
+    }
+
+    .loss {
+      color: var(--accent-red);
+    }
+
+    .history-btn {
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .auto-sell-section {
+      background-color: var(--bg-card);
+      padding: 15px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    .auto-sell-title {
+      font-weight: bold;
+      margin-bottom: 10px;
+    }
+
+    .auto-sell-desc {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
+    .custom-modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 50%;
+    height: 50%;
+
+    background-color: rgba(0,0,0,0.6);
+      overflow: hidden;
+  }
+
+ .custom-modal-content {
+  background-color: var(--bg-dark);
+  margin: 0;
+  padding: 20px;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  position: relative;
+  overflow: auto;
+}
+
+  .custom-modal-close {
+    position: absolute;
+    top: 10px;
+    right: 16px;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+  }
+
+  .table {
+    .table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed; /* Ensures proper column sizing */
+}
+  }
+
+  .table th, .table td {
+    padding: 8px 12px;
+    border: 1px solid var(--bg-dark);
+    word-break: break-word;
+  }
+
+  .table th {
+    color: white;
+    background-color: var(--bg-dark);
+  }
+  .disableInput{
+    pointer-events: none;
+    background-color: #f0f0f0;
+  }
+  .trade-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(48%, 1fr));
+  gap: 20px;
+}
+  #trade-wrapper {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(48%, 1fr));
+  gap: 20px;
+}
+
+/* Individual trade card */
+.trade-card {
+  background-color: var(--bg-card);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Remove redundant headings */
+.trade-card h5.trade-title {
+  display: none;
+}
+
+/* Uniform button styling */
+.trade-card .btn {
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 0.9rem;
+}
+#trade-wrapper {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(48%, 1fr));
+  gap: 20px;
+}
+.trade-card {
+  background-color: var(--bg-card);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.trade-card .input-group,
+.trade-card .quick-sell-buttons,
+.trade-card .sell-section {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.trade-card .form-control {
+  min-width: 100px;
+}
+
+  </style>
+</head>
+<body>
+<h2 style="margin-bottom: 20px;">Trade Monitor</h2>
+
+<!--<div id="trade-wrapper"></div>-->
+<div id="trade-wrapper" class="trade-grid"></div>
+
+<script src="/static/js/js/dashboard-logic.js"></script>
+<script src="/static/js/js/LongTrade.js"></script>
+</body>
+</html>
+

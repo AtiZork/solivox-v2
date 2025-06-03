@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Trade Monitor</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<div class="monitor-container">
+    <div class="header">
+        <select id="tradeType">
+            <option>RAD</option>
+            <option>LONG</option>
+            <option>SNIPE</option>
+        </select>
+        <span id="tokenName">{{ token.name }}</span>
+        <span id="tokenAddress">{{ token.address }}</span>
+        <button onclick="copyTokenAddress()">📋</button>
+        <span id="elapsedTime">0s</span>
+        <div class="metrics">
+            <span class="value">{{ token.price }}</span>
+            <span class="value">{{ token.market_cap }}</span>
+            <span class="value">{{ token.profit }}%</span>
+            <span class="value">{{ token.payout }}</span>
+        </div>
+    </div>
+
+    <canvas id="tradeChart"></canvas>
+
+    <div class="controls">
+        <div class="sell-buttons">
+            {% for pct in [10, 25, 50, 80, 100] %}
+                <button onclick="sellPercentage({{ pct }})">{{ pct }}%</button>
+            {% endfor %}
+        </div>
+        <div class="manual-sell">
+            <input type="number" placeholder="Tokens to sell">
+            <input type="number" placeholder="SOL to sell">
+            <button onclick="executeSell()">Sell</button>
+        </div>
+        <button onclick="openHistory()">History</button>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/monitor.js') }}"></script>
+</body>
+</html>
