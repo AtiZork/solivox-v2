@@ -21,8 +21,9 @@ def register():
         return jsonify({"msg": "User registered successfully"}), 201
     except Exception as e:
         db.session.rollback()
-        print(f"Error during registration: {e}")
-        return jsonify({"message":e}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({"message": str(e)}), 500
 
 @user_register_bp.route('/login', methods=['POST'])
 def login():

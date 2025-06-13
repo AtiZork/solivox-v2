@@ -95,6 +95,8 @@ from init_scheduler import create_scheduler
 create_scheduler(app)
 from  autosnipe_sell_script import auto_snipe_auto_sell_schedular
 auto_snipe_auto_sell_schedular(app)
+from  autosnipe_buy_script import  auto_buy_token
+auto_buy_token(app)
 
 # Press the green button in the gutter to run the script.
 if __name__ == "__main__":
