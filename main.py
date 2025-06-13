@@ -16,7 +16,7 @@ from menual_sell_token import manual_sell_trade_bp
 from flask_socketio import SocketIO
 from trade_history import trade_history_bp
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='/home/ubuntu/solivox-v2/static')
 # for development
 socketio = SocketIO(app, cors_allowed_origins="*")
 # for production

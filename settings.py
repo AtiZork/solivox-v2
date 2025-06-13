@@ -1,7 +1,8 @@
 from solana.rpc.api import Client
 
 # for local
-secure_directory = '/home/adminn/Music'  # Customize your path here
+#secure_directory = '/home/adminn/Music'  # Customize your path here
+secure_directory = '/home/ubuntu' 
 # for live
 # secure_directory = '/home/solivox/Music'  # Customize your path here
 # Connect to your local Solana node
