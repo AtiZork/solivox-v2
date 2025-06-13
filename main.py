@@ -15,8 +15,11 @@ from wallet_managment import wallet_bp
 from menual_sell_token import manual_sell_trade_bp
 from flask_socketio import SocketIO
 from trade_history import trade_history_bp
-
+# for live
 app = Flask(__name__, static_folder='/home/ubuntu/solivox-v2/static')
+# for development
+# app = Flask(__name__)
+
 # for development
 socketio = SocketIO(app, cors_allowed_origins="*")
 # for production
