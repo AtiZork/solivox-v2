@@ -75,13 +75,23 @@ document.getElementById("createwalletForm").addEventListener("submit",  async  f
 
         try {
             // Send POST Request
+            const token = localStorage.getItem("token");  // Get JWT token
+            console.log("Token:", token);  // Debugging: Check if token is retrieved correctly
             const response = await fetch(apiUrl, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`  // ✅ Send token in header
                 },
                 body: JSON.stringify(data),
             });
+            // const response = await fetch(apiUrl, {
+            //     method: "POST",
+            //     headers: {
+            //         "Content-Type": "application/json",
+            //     },
+            //     body: JSON.stringify(data),
+            // });
 
 
 
