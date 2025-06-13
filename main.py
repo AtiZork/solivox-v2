@@ -104,7 +104,7 @@ auto_buy_token(app)
 # Press the green button in the gutter to run the script.
 if __name__ == "__main__":
     # for production
-    # socketio.run(app, host="0.0.0.0", port=8000)
+   # socketio.run(app, host="0.0.0.0", port=8000)
     # for development
-    socketio.run(app, host="0.0.0.0", port=8000, debug=True, allow_unsafe_werkzeug=True)
+   socketio.run(app, host="0.0.0.0", port=8000, debug=True, allow_unsafe_werkzeug=True)
     # app.run(host="0.0.0.0", port=8000, debug=True)
