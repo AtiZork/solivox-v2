@@ -15,9 +15,11 @@ wallet_bp = Blueprint('wallet_bp', __name__)
 
 
 @wallet_bp.route('/create_wallet', methods=['POST'])
+@jwt_required()
 def create_wallet():
     """Create a new Solana wallet and return mnemonic, private key file path, and public key."""
     try:
+        user_id = get_jwt_identity()
         title = request.json['title']
         # Generate a new mnemonic phrase (12 words)
         mnemonic = Mnemonic("english")
@@ -45,7 +47,7 @@ def create_wallet():
             key_file.write(private_key)
 
         # Store the path in the database instead of the private key
-        new_wallet = Wallet(public_key=str(public_key), private_key_path=private_key_path, title=title)
+        new_wallet = Wallet(public_key=str(public_key), private_key_path=private_key_path, user_id=user_id, title=title)
         db.session.add(new_wallet)
         db.session.commit()
 
@@ -53,7 +55,8 @@ def create_wallet():
             "status": "success",
             "recovery_phrase": recovery_phrase,  # Store securely!
             "private_key_path": private_key_path,  # Return path of private key file
-            "public_key": str(public_key),  # Convert to string
+            "public_key": str(public_key),
+            "user":user_id,
             "message": "wallet created successfully"
         }), 200
 
