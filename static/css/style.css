@@ -13690,7 +13690,8 @@ html[dir="rtl"] [direction="rtl"][data-sidebar-style="compact"]:not([data-layout
 .deznav {
   width: 21.563rem;
   padding-bottom: 0;
-  height: calc(100% - 88px);
+  height: 100vh;
+  /*height: calc(100% - 88px);*/
   position: absolute;
   top: 5.5rem;
   padding-top: 0;
@@ -50185,6 +50186,18 @@ $color_pallate_15: #ed0b4c; */
     font-size: 16px;
     padding: 4px 8px;
     width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.address-copy-btn{
+     background-color: #3d4465;
+    color: #fff;
+    font-size: 16px;
+    padding: 4px 8px;
+    width: 45px;
     height: 30px;
     border-radius: 8px;
     display: flex;

@@ -821,7 +821,32 @@
 <script src="/static/js/js/LongTrade.js"></script>
 <script>
     document.addEventListener('DOMContentLoaded', function () {
+        const token = localStorage.getItem('token');
+        const walletGroup = document.getElementById('openDrawer');
 
+        // ✅ Show or hide Wallet button based on token
+        if (token) {
+            walletGroup.style.display = 'inline-block';
+        } else {
+            walletGroup.style.display = 'none';
+        }
+        const hamburgerIcon = document.querySelector('.hamburger');  // The lines (hamburger) icon
+        const sidebar = document.querySelector('.deznav');  // Sidebar element
+        const contentBody = document.querySelector('.content-body');
+
+        // Initially show the sidebar
+        sidebar.style.display = 'block';  // Show the sidebar by default
+
+        // Add event listener to toggle sidebar visibility
+        hamburgerIcon.addEventListener('click', function () {
+            if (sidebar.style.display === 'none') {
+                sidebar.style.display = 'block';  // Show the sidebar when clicked
+                contentBody.style.marginLeft = '21rem';
+            } else {
+                sidebar.style.display = 'none';  // Hide the sidebar when clicked
+                contentBody.style.marginLeft = '2rem';
+            }
+        });
         /* initialize the external events
         -----------------------------------------------------------------*/
 

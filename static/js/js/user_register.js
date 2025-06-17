@@ -85,7 +85,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // Logout
   logoutBtn.addEventListener('click', () => {
     localStorage.removeItem('token');
+    const walletGroup = document.getElementById('openDrawer');
+    walletGroup.style.display = 'none';
+
     loadUserInfo();
+    location.reload(); // Reload the page after logout
   });
 
   // Initial check on page load
