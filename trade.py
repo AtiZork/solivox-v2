@@ -402,7 +402,7 @@ def buy_token(trade_id):
             "inputMint": "So11111111111111111111111111111111111111112",  # WSOL
             "outputMint": token_address,  # USDC
             "amount": amount_in_lamports,  # 0.01 WSOL
-            "slippageBps": trade.long_slippage
+            "slippageBps": int(trade.long_slippage)
         }
 
         quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"

@@ -70,7 +70,7 @@ def auto_trade():
     while True:
         try:
             # trades = Trade.query.all()
-            trades = Trade.query.filter_by(executed=False).order_by(Trade.id.desc()).all()
+            trades = Trade.query.filter_by(executed=False, auto_snipe=False).order_by(Trade.id.desc()).all()
 
             trade_type = "SELL"
             for trade_data in trades:

@@ -447,7 +447,7 @@ async function fetchWallets() {
             const formattedBalance = wallet.balance ? `$${wallet.balance.toLocaleString()}` : "$0.00";
 
             walletCardsHTML += `
-                <div class="col-md-4 col-sm-6 mb-4"> <!-- 4 cards per row on md+, 2 per row on sm -->
+                <div class="col-md-3 col-sm-6 mb-4"> <!-- 4 cards per row on md+, 2 per row on sm -->
                     <div class="wallet-card ${bgColor} p-3 rounded shadow">
                         <div class="text-white">
                             <p class="fs-14 mb-0 font-w100">${wallet.title || "No Title"}</p>

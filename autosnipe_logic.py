@@ -1,7 +1,9 @@
 import asyncio
+import atexit
 import json
 import os
 import base64
+import threading
 import time
 import logging
 import requests
@@ -502,3 +504,20 @@ def auto_buy_processor():
             logger.error(f"Unexpected error in auto_buy_processor loop: {str(e)}", exc_info=True)
             time.sleep(1) # Wait a bit longer on error to prevent busy loop
     set_processor_running_status(False) # Set to stopped when loop finishes
+
+
+def start_background_jobs():
+    # Start the token detection listener in a separate thread
+    listener_thread = threading.Thread(target=asyncio.run, args=(solana_logs_listener(),), daemon=True)
+    listener_thread.start()
+    logger.info("Token detection listener started in background.")
+
+    # Start the auto-buy processor in another thread
+    processor_thread = threading.Thread(target=auto_buy_processor, daemon=True)
+    processor_thread.start()
+    logger.info("Auto-buy processor started in background.")
+
+    # Ensure threads shut down gracefully on app exit
+    atexit.register(lambda: set_listener_running_status(False))
+    atexit.register(lambda: set_processor_running_status(False))
+

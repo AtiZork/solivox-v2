@@ -1,6 +1,8 @@
 from flask_jwt_extended import JWTManager
 
 from autosnipe import autosnipe_bp
+from autosnipe_buy_new_token import autosnipe_trade_bp
+from autosnipe_logic import start_background_jobs
 from charts import charts_bp
 from long_sell_trade import sell_trade_bp
 from models import db, TradeLog
@@ -89,6 +91,7 @@ app.register_blueprint(autosnipe_bp)
 
 app.register_blueprint(token_price_bp)
 app.register_blueprint(user_register_bp)
+app.register_blueprint(autosnipe_trade_bp)
 
 # app.register_blueprint(solana_auto_snipe_bp)
 
@@ -103,6 +106,7 @@ auto_buy_token(app)
 
 # Press the green button in the gutter to run the script.
 if __name__ == "__main__":
+   # start_background_jobs()
     # for production
    # socketio.run(app, host="0.0.0.0", port=8000)
     # for development

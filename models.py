@@ -119,7 +119,7 @@ class Trade(db.Model):
     customized_configuration = db.Column(db.Boolean, default=False)
     purchased_token_amount = db.Column(db.Float, default=0.0)
     # Foreign key reference to TradeConfiguration
-    config_id = db.Column(db.Integer, db.ForeignKey('trade_configuration.id'), nullable=False)
+    config_id = db.Column(db.Integer, db.ForeignKey('trade_configuration.id'), nullable=True)
     config = db.relationship('TradeConfiguration', backref=db.backref('trades', lazy=True))
     # Trading parameters
     sell_20_at_200_percent_profit = db.Column(db.Float, default=3.0)
