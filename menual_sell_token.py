@@ -206,7 +206,7 @@ def sell_token(trade_id):
             executed_trade = TradeHistory(
                 trade_id=last_trade.id if last_trade else None,
                 token_address=token_address,
-                trade_type="Manual SEll",
+                trade_type="ManualSEll",
                 amount=amount,
                 execution_price=current_token_price,  # Use the fetched price
                 tx_id=signature
