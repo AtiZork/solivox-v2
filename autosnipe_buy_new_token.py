@@ -278,7 +278,7 @@ def buy_token(token_address: str, user_id: int) -> bool:
         config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
         if not config:
             logger.error(f"[Buy Token] No active AutoSnipeConfig found for user. Cannot proceed with buy.")
-            return
+            return True
 
         # Fetch relevant settings from the AutoSnipeConfig
         # These are used for the actual swap execution parameters
@@ -289,7 +289,7 @@ def buy_token(token_address: str, user_id: int) -> bool:
         wallet = Wallet.query.filter_by(user_id=user_id).first() # Assuming user_id can link to a wallet
         if not wallet:
             logger.error(f"Failed to fetch wallet for user.")
-            return
+            return True
         to_pubkey = wallet.public_key
 
         amount = buy_amount_sol # Amount in SOL to spend
@@ -306,12 +306,12 @@ def buy_token(token_address: str, user_id: int) -> bool:
 
         if wallet_balance < amount:
             logger.error(f"Insufficient balance. Wallet has {wallet_balance:.4f} SOL, but {amount:.4f} SOL is required.")
-            return
+            return True
 
         private_key_path = wallet.private_key
         if not os.path.exists(private_key_path):
             logger.error(f"Failed to fetch private key")
-            return
+            return True
 
         with open(private_key_path, 'rb') as key_file:
             private_key_bytes = key_file.read()
@@ -334,11 +334,11 @@ def buy_token(token_address: str, user_id: int) -> bool:
             try:
                 print(f"Error fetching quote: {quote_response.json()}")
                 logger.error(f"Error fetching quote")
-                return
+                return True
             except JSONDecodeError:
                 print(f"Error fetching quote: {quote_response.text}")
                 logger.error(f"Error fetching quote (non-JSON response)")
-                return
+                return True
 
         quote_data = quote_response.json()
         estimated_tokens = int(quote_data.get("outAmount", 0)) / (10 ** quote_data.get("outputMintDecimals", 6))
@@ -358,11 +358,11 @@ def buy_token(token_address: str, user_id: int) -> bool:
             try:
                 print(f"Error performing swap: {swap_response.json()}")
                 logger.error(f"Error performing swap)")
-                return
+                return True
             except JSONDecodeError:
                 print(f"Error performing swap: {swap_response.text}")
                 logger.error(f"Error performing swap (non-JSON response)")
-                return
+                return True
 
         swap_data = swap_response.json()
 
@@ -400,7 +400,7 @@ def buy_token(token_address: str, user_id: int) -> bool:
             print(f"Custom Program Error Code: {error_message.data.err.err.code}")
             print(f"Message: {error_message.message}")
             logger.error(error_message.message)
-            return
+            return True
 
         # Create new Trade record with simplified fields
         new_trade = Trade(
@@ -456,7 +456,7 @@ def buy_token(token_address: str, user_id: int) -> bool:
         import traceback
         traceback.print_exc()
         logger.error(f"An error occurred: {str(e)}")
-        return
+        return True
 
 def autosnipe_buy_new_token(token_address: str, user_id: int) -> bool:
     """
@@ -479,108 +479,110 @@ def detect_new_tokens_single_pass(last_checked_slot: int, processed_token_mints:
     Performs a single pass of detecting new SPL token mints and triggering autosnipe.
     Returns the current slot after checking.
     """
-    try:
-        config = AutoSnipeConfig.query.filter_by(active=True).first()
-        user_id = int(config.user_id)
-        current_slot_response = solana_client.get_slot()
-        current_slot = current_slot_response.value
+    from main import app
+    with app.app_context():
+        try:
+            config = AutoSnipeConfig.query.filter_by(active=True).first()
+            user_id = int(config.user_id)
+            current_slot_response = solana_client.get_slot()
+            current_slot = current_slot_response.value
 
-        if current_slot <= last_checked_slot:
-            return last_checked_slot
+            if current_slot <= last_checked_slot:
+                return last_checked_slot
 
-        print(f"[Detector] Checking new blocks from slot {last_checked_slot + 1} to {current_slot}...")
+            print(f"[Detector] Checking new blocks from slot {last_checked_slot + 1} to {current_slot}...")
 
-        signatures_response = solana_client.get_signatures_for_address(
-            SPL_TOKEN_PROGRAM_ID,
-            limit=50
-        )
-        signatures = signatures_response.value
+            signatures_response = solana_client.get_signatures_for_address(
+                SPL_TOKEN_PROGRAM_ID,
+                limit=50
+            )
+            signatures = signatures_response.value
 
-        new_mints_found_in_batch = set()
+            new_mints_found_in_batch = set()
 
-        for siginfo in signatures:
-            signature = siginfo.signature
-            if siginfo.slot > last_checked_slot:
-                try:
-                    # time.sleep(4)  # Add sleep to avoid rate limiting
-                    tx_response = solana_client.get_transaction(signature, encoding='jsonParsed',
-                                                                max_supported_transaction_version=0)
-                    tx_data = tx_response.value
+            for siginfo in signatures:
+                signature = siginfo.signature
+                if siginfo.slot > last_checked_slot:
+                    try:
+                        # time.sleep(4)  # Add sleep to avoid rate limiting
+                        tx_response = solana_client.get_transaction(signature, encoding='jsonParsed',
+                                                                    max_supported_transaction_version=0)
+                        tx_data = tx_response.value
 
-                    if not tx_data:
+                        if not tx_data:
+                            continue
+
+                        instructions = tx_data.transaction.transaction.message.instructions
+                        for instruction in instructions:
+                            # if (instruction.get('programId') == str(SPL_TOKEN_PROGRAM_ID) and
+                            #         'parsed' in instruction and
+                            #         instruction['parsed'].get('type') == 'initializeMint'):
+                            if instruction.program_id == SPL_TOKEN_PROGRAM_ID:
+                                print(instruction.parsed['type'])
+                                if instruction.parsed.get('type') == 'initializeMint':
+                                    if (instruction.program_id == SPL_TOKEN_PROGRAM_ID and
+                                            hasattr(instruction, 'parsed') and
+                                            instruction.parsed.get('type') == 'initializeMint'):
+                                        # mint_address = instruction['parsed']['info'].get('mint')
+                                        mint_address = instruction.parsed['info'].get('mint')
+                                        if mint_address and mint_address not in processed_token_mints:
+                                            print(f"[Detector] Found NEW TOKEN MINT: {mint_address} (Signature: {signature})")
+                                            new_mints_found_in_batch.add(mint_address)
+                                            processed_token_mints.add(mint_address)
+
+                    except Exception as e:
+                        print(f"[Detector] Error processing transaction {signature}: {e}")
                         continue
-
-                    instructions = tx_data.transaction.transaction.message.instructions
-                    for instruction in instructions:
-                        # if (instruction.get('programId') == str(SPL_TOKEN_PROGRAM_ID) and
-                        #         'parsed' in instruction and
-                        #         instruction['parsed'].get('type') == 'initializeMint'):
-                        if instruction.program_id == SPL_TOKEN_PROGRAM_ID:
-                            print(instruction.parsed['type'])
-                            if instruction.parsed.get('type') == 'initializeMint':
-                                if (instruction.program_id == SPL_TOKEN_PROGRAM_ID and
-                                        hasattr(instruction, 'parsed') and
-                                        instruction.parsed.get('type') == 'initializeMint'):
-                                    # mint_address = instruction['parsed']['info'].get('mint')
-                                    mint_address = instruction.parsed['info'].get('mint')
-                                    if mint_address and mint_address not in processed_token_mints:
-                                        print(f"[Detector] Found NEW TOKEN MINT: {mint_address} (Signature: {signature})")
-                                        new_mints_found_in_batch.add(mint_address)
-                                        processed_token_mints.add(mint_address)
-
-                except Exception as e:
-                    print(f"[Detector] Error processing transaction {signature}: {e}")
-                    continue
-        token_address = 'D2QvT2fgdvaLxDLiTFjHeRqeZFXU8UqFdJr7xcgHmoon'
-        # txns = get_token_transactions(token_address, config.min_txns)
-        txns = get_token_specific_transactions(token_address, config.min_txns, config.buy_txns_over_80_usd)
-        print(txns)
-        for new_token_address in new_mints_found_in_batch:
-            print(f"[Detector] Attempting autosnipe for detected new token: {new_token_address}")
-            autosnipe_buy_new_token(new_token_address, user_id)
-        return current_slot
-    except Exception as e:
-        print(f"[Detector] An error occurred in detection pass: {e}")
-        return last_checked_slot
+            # token_address = 'D2QvT2fgdvaLxDLiTFjHeRqeZFXU8UqFdJr7xcgHmoon'
+            # # txns = get_token_transactions(token_address, config.min_txns)
+            # txns = get_token_specific_transactions(token_address, config.min_txns, config.buy_txns_over_80_usd)
+            # print(txns)
+            for new_token_address in new_mints_found_in_batch:
+                print(f"[Detector] Attempting autosnipe for detected new token: {new_token_address}")
+                autosnipe_buy_new_token(new_token_address, user_id)
+            return current_slot
+        except Exception as e:
+            print(f"[Detector] An error occurred in detection pass: {e}")
+            return last_checked_slot
 
 autosnipe_trade_bp = Blueprint('autosnipe_trade_bp', __name__)
 
 
-@autosnipe_trade_bp.route('/detect_new_tokens', methods=['POST'])
-def detect_new_tokens():
-    global last_checked_slot, processed_token_mints
-    try:
-        # Call the function
-        current_slot = detect_new_tokens_single_pass(last_checked_slot, processed_token_mints)
-
-        # Update last_checked_slot
-        last_checked_slot = current_slot
-
-        return jsonify({
-            "status": "success",
-            "last_checked_slot": last_checked_slot,
-            "processed_token_mints": list(processed_token_mints)
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# from apscheduler.schedulers.background import BackgroundScheduler
-# import atexit
-#
-# # Initialize variables
-# last_checked_slot = 0  # Start from slot 0
-# processed_token_mints = set()  # Create an empty set to track processed token mints
-#
-# def run_detector():
+# @autosnipe_trade_bp.route('/detect_new_tokens', methods=['POST'])
+# def detect_new_tokens():
 #     global last_checked_slot, processed_token_mints
-#     last_checked_slot = detect_new_tokens_single_pass(last_checked_slot, processed_token_mints)
+#     try:
+#         # Call the function
+#         current_slot = detect_new_tokens_single_pass(last_checked_slot, processed_token_mints)
 #
-# # Set up the scheduler
-# scheduler = BackgroundScheduler()
-# scheduler.add_job(run_detector, 'interval', seconds=10)  # Run every 10 seconds
-# scheduler.start()
+#         # Update last_checked_slot
+#         last_checked_slot = current_slot
 #
-# # Ensure the scheduler shuts down gracefully on exit
-# atexit.register(lambda: scheduler.shutdown())
-#
-# print("Detector is running in the background...")
+#         return jsonify({
+#             "status": "success",
+#             "last_checked_slot": last_checked_slot,
+#             "processed_token_mints": list(processed_token_mints)
+#         })
+#     except Exception as e:
+#         return jsonify({"status": "error", "message": str(e)}), 500
+
+from apscheduler.schedulers.background import BackgroundScheduler
+import atexit
+
+# Initialize variables
+last_checked_slot = 0  # Start from slot 0
+processed_token_mints = set()  # Create an empty set to track processed token mints
+
+def run_detector():
+    global last_checked_slot, processed_token_mints
+    last_checked_slot = detect_new_tokens_single_pass(last_checked_slot, processed_token_mints)
+
+# Set up the scheduler
+scheduler = BackgroundScheduler()
+scheduler.add_job(run_detector, 'interval', seconds=5)  # Run every 10 seconds
+scheduler.start()
+
+# Ensure the scheduler shuts down gracefully on exit
+atexit.register(lambda: scheduler.shutdown())
+
+print("Detector is running in the background...")

@@ -132,7 +132,9 @@ def handle_trade_subscription():
                 payout_sol = 0
 
             # --- Get token price history for chart ---
-            token_prices = TokenPrice.query.filter_by(trade_id=trade.id).order_by(TokenPrice.timestamp).limit(30).all()
+            # token_prices = TokenPrice.query.filter_by(trade_id=trade.id).order_by(TokenPrice.timestamp).limit(30).all()
+            token_prices = TokenPrice.query.filter_by(trade_id=trade.id).order_by(TokenPrice.timestamp.desc()).limit(30).all()
+            token_prices = list(reversed(token_prices))
             price_points = [
                 {
                     "id": p.id,
@@ -141,7 +143,7 @@ def handle_trade_subscription():
                     "timestamp": p.timestamp.strftime("%Y-%m-%d %H:%M:%S")
                 } for p in token_prices
             ]
-
+            print(price_points)
             trade_data.append({
                 "id": trade.id,
                 "token_name": trade.token_name if trade.token_name else trade.token_address,
@@ -170,6 +172,8 @@ def handle_trade_subscription():
                 "buy_if_price_up": float(trade.buy_if_price_up if trade.buy_if_price_up else 0),
                 "amount": float(trade.amount),
                 "buy_now": trade.buy_now,
+                "trade_type": trade.trade_type,
+                "buy_token_if_price": trade.buy_token_if_price,
                 "created_at": trade.created_at.strftime("%Y-%m-%d %H:%M:%S")
             })
 

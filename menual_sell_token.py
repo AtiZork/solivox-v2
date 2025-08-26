@@ -124,12 +124,19 @@ def sell_token(trade_id):
             private_key_bytes = key_file.read()
             # Create a solders Keypair directly from the private key bytes
         wallet_keypair = SoldersKeypair.from_seed(private_key_bytes)
-        metadata = get_token_metadata(token_address)
-        if metadata:
-            decimals = metadata.get("decimals", 0)
-            print(f"Token has {decimals} decimals")
+        token_pubkey = Pubkey.from_string(token_address)
+        token_info = solana_client.get_token_supply(token_pubkey)
+        if token_info and hasattr(token_info.value, "decimals"):
+            decimals = token_info.value.decimals
+            print(f"Token has {decimals} decimals (fetched from Solana mainnet)")
         else:
             decimals = 0
+        # metadata = get_token_metadata(token_address)
+        # if metadata:
+        #     decimals = metadata.get("decimals", 0)
+        #     print(f"Token has {decimals} decimals")
+        # else:
+        #     decimals = 0
 
         amount_in_lamports = int(amount * (10 ** decimals))
 

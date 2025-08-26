@@ -107,6 +107,8 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
         buy_slippage: parseFloat(document.getElementById("updateBuySlippage").value),
         sell_gas_fee: parseFloat(document.getElementById("updateSellGasSol").value),
         sell_slippage: parseFloat(document.getElementById("updateSellSlippage").value),
+        buy_if_price_up: parseFloat(document.getElementById("buyIfPriceUp").value),
+        buy_if_price_down: parseFloat(document.getElementById("buyIfPriceDown").value),
     };
 
     // Validate inputs
@@ -208,6 +210,14 @@ function openEditModal(value) {
         return;
     }
     transactionId = transaction.id;
+    const isPending = transaction.trade_type === "BUY" && transaction.buy_token_if_price === true;
+    if (isPending) {
+        document.getElementById("buyIfFields").classList.remove("d-none");
+        document.getElementById("buyIfPriceUp").value = transaction.buy_if_price_up || '';
+        document.getElementById("buyIfPriceDown").value = transaction.buy_if_price_down || '';
+    } else {
+        document.getElementById("buyIfFields").classList.add("d-none");
+    }
     // Set the token address inside the modal input field (or wherever required)
     document.getElementById("editTokenAddress").value = transaction.token_address || "";
     document.getElementById("editAmount").value = transaction.amount || "";
@@ -224,6 +234,8 @@ function openEditModal(value) {
     document.getElementById("updateBuySlippage").value = transaction.buy_slippage || 30;
     document.getElementById("updateSellGasSol").value = transaction.sell_gas_fee || 0.001;
     document.getElementById("updateSellSlippage").value = transaction.sell_slippage || 30;
+    document.getElementById("buyIfPriceUp").value = transaction.buy_if_price_up || 0;
+    document.getElementById("buyIfPriceDown").value = transaction.buy_if_price_down || 0;
 
 
     // Show the modal
@@ -239,6 +251,10 @@ function displayTransaction(transaction) {
     // Create card element
     const card = document.createElement("div");
     card.classList.add("col-xl-4", "col-lg-6", "col-md-6", "col-12");
+    // Determine status based on conditions
+    const status = transaction.trade_type === 'BUY' && transaction.buy_token_if_price
+        ? '<span class="badge bg-warning text-dark">Pending</span>'
+        : '<span class="badge bg-success">Confirmed</span>';
     card.innerHTML = `
         <div class="card shadow-sm border">
             <div class="card-body">
@@ -269,6 +285,7 @@ function displayTransaction(transaction) {
                     </button>
                 </div>
                 <p class="card-text"><strong>Created At:</strong> ${transaction.created_at}</p>
+                <p class="card-text"><strong>Status:</strong> ${status}</p>
             </div>
         </div>
     `;

@@ -235,7 +235,7 @@ def auto_snipe_auto_sell_schedular(app):
 
     # Start background job
     scheduler = BackgroundScheduler()
-    scheduler.add_job(auto_snipe_sell, 'interval', seconds=5000)  # Run auto_trade every 60 seconds (or adjust as needed)
+    scheduler.add_job(auto_snipe_sell, 'interval', seconds=5)  # Run auto_trade every 60 seconds (or adjust as needed)
     scheduler.start()
     # To ensure the scheduler shuts down gracefully when the app exits
     atexit.register(lambda: scheduler.shutdown())

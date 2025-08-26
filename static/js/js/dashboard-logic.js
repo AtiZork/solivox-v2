@@ -22,6 +22,7 @@ function formatNumber(value) {
     trades.forEach((trade, index) => {
       const tokenId = trade.token_address;
       const chartId = `price-chart-${index}`;
+      const status = (trade.trade_type === 'BUY' && trade.buy_token_if_price === true) ? 'Pending' : 'Confirmed';
 
       const block = document.createElement("div");
       // block.className = "container";
@@ -46,7 +47,10 @@ function formatNumber(value) {
                   <i class="fas fa-copy"></i>
                 </button>
               </div>
-              <div class="time-elapsed">Time elapsed: ${trade.created_at || 'N/A'}</div>
+              <div class="time-elapsed">
+                Time elapsed: ${trade.created_at || 'N/A'} <br>
+                Status: ${status}
+              </div>
             </div>
             <div>
               <div class="current-price">Current Price(USD): ${trade.current_price}</div>
@@ -295,6 +299,18 @@ function formatNumber(value) {
                                                 <small class="text-danger d-none error-message" id="updateSellSlippageError">Amount is required!</small>
                                             </div>
                                         </div>
+                                        <div id="buyIfFields" class="d-none">
+                                            <div class="row">
+                                                <div class="form-group col-6">
+                                                    <label for="buyIfPriceUp" class="form-label" style="color: black">Buy If Price Up</label>
+                                                    <input type="number" class="form-control" step="any" id="buyIfPriceUp" />
+                                                </div>
+                                                <div class="form-group col-6">
+                                                    <label for="buyIfPriceDown" class="form-label" style="color: black">Buy If Price Down</label>
+                                                    <input type="number" class="form-control" step="any" id="buyIfPriceDown" />
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
                                     <button type="submit" id="saveChangesBtn" class="btn btn-primary">Save Changes</button>
                             </div>
@@ -329,6 +345,14 @@ function formatNumber(value) {
         console.error("Edit modal not found!");
         return;
       }
+      const isPending = trade.trade_type === "BUY" && trade.buy_token_if_price === true;
+      if (isPending) {
+          document.getElementById("buyIfFields").classList.remove("d-none");
+          document.getElementById("buyIfPriceUp").value = trade.buy_if_price_up || '';
+          document.getElementById("buyIfPriceDown").value = trade.buy_if_price_down || '';
+      } else {
+          document.getElementById("buyIfFields").classList.add("d-none");
+      }
       document.getElementById("editTokenAddress").value = trade.token_address || "";
       document.getElementById("editAmount").value = trade.amount || "";
       document.getElementById("editInitialPrice").value = trade.initial_price || "";
@@ -344,6 +368,8 @@ function formatNumber(value) {
       document.getElementById("updateBuySlippage").value = trade.buy_slippage || 30;
       document.getElementById("updateSellGasSol").value = trade.sell_gas_fee || 0.001;
       document.getElementById("updateSellSlippage").value = trade.sell_slippage || 30;
+      document.getElementById("buyIfPriceUp").value = trade.buy_if_price_up || 0;
+      document.getElementById("buyIfPriceDown").value = trade.buy_if_price_down || 0;
 
       const modalInstance = new bootstrap.Modal(modal);
       modalInstance.show();
@@ -372,6 +398,8 @@ function formatNumber(value) {
       buy_slippage: parseFloat(document.getElementById("updateBuySlippage").value),
       sell_gas_fee: parseFloat(document.getElementById("updateSellGasSol").value),
       sell_slippage: parseFloat(document.getElementById("updateSellSlippage").value),
+      buy_if_price_up: parseFloat(document.getElementById("buyIfPriceUp").value),
+      buy_if_price_down: parseFloat(document.getElementById("buyIfPriceDown").value),
     };
 
     fetch(`/trade/${tradeId}`, {

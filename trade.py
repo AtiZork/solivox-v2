@@ -286,6 +286,7 @@ def get_trades():
                 "buy_gas_fee": trade.long_buy_gas_fee,
                 "sell_gas_fee": trade.long_sell_gas_fee,
                 "buy_now": trade.buy_now,
+                "buy_token_if_price": trade.buy_token_if_price,
             })
 
             trade_list.append(base_trade_data)
@@ -328,12 +329,21 @@ def update_trade(trade_id):
             "sell_at_1000_percent_profit": "sell_at_1000_percent_profit",
             "sell_at_2000_percent_profit": "sell_at_2000_percent_profit",
             "sell_at_10000_percent_profit": "sell_at_10000_percent_profit",
+            "buy_if_price_up": "buy_if_price_up",
+            "buy_if_price_down": "buy_if_price_down",
         }
 
-        # Apply updates based on mapping
+        # # Apply updates based on mapping
+        # for payload_field, db_field in field_mapping.items():
+        #     if payload_field in data:
+        #         setattr(trade, db_field, data[payload_field])
+        # Apply only the fields that exist in the payload
         for payload_field, db_field in field_mapping.items():
             if payload_field in data:
-                setattr(trade, db_field, data[payload_field])
+                value = data[payload_field]
+                if value == "":  # Optional: treat empty string as None
+                    value = None
+                setattr(trade, db_field, value)
 
         db.session.commit()
 

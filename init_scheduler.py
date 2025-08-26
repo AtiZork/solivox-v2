@@ -10,7 +10,7 @@ def create_scheduler(app):
     def fetch_and_store_prices():
         with app.app_context():
             try:
-                trades = Trade.query.order_by(Trade.created_at.desc()).limit(1).all()
+                trades = Trade.query.order_by(Trade.created_at.desc()).limit(2).all()
                 for trade_ in trades:
                     address = trade_.token_address
                     token_price = get_token_symbol_and_price(address)["usdPrice"]
@@ -28,6 +28,6 @@ def create_scheduler(app):
             except Exception as e:
                 print("[×] Scheduler Error:", e)
 
-    scheduler.add_job(fetch_and_store_prices, trigger='interval', minutes=60)
+    scheduler.add_job(fetch_and_store_prices, trigger='interval', minutes=15)
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
