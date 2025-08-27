@@ -1,9 +1,9 @@
 from solana.rpc.api import Client
 
 # for local
-# secure_directory = '/home/adminn/Music'  # Customize your path here
+secure_directory = '/home/ahmad-mansoor/Desktop'  # Customize your path here
 #for live server
-secure_directory = '/home/ubuntu' # Customize your path here
+# secure_directory = '/home/ubuntu' # Customize your path here
 # for live
 # Connect to your local Solana node
 solana_client = Client("https://api.mainnet-beta.solana.com")
