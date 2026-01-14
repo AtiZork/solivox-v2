@@ -87,13 +87,18 @@ def sell_token(trade_id):
         sell_percent = data.get('sell_percent')  # sell % like 10%, 25%, etc.
         sell_amount = data.get('sell_amount')  # Optional: sell exact amount
         total_tokens = last_trade.purchased_token_amount
+        token_price_usd = None
+        sol_price_usd = None
 
         # Fetch token and SOL prices in USD
         current_token_price_ = get_token_symbol_and_price(token_address)
-        token_price_usd = current_token_price_["usdPrice"]
-        sol_price_usd = get_token_symbol_and_price("So11111111111111111111111111111111111111112")["usdPrice"]
+        if current_token_price_.get("usdPrice") is not None and current_token_price_.get("sol_price_usd"):
+            token_price_usd = current_token_price_["usdPrice"]  # price in used
+            sol_price_usd = current_token_price_["sol_price_usd"]
+            if not sol_price_usd:
+                sol_price_usd = get_token_symbol_and_price("So11111111111111111111111111111111111111112")["usdPrice"]
 
-        if not token_price_usd or not sol_price_usd:
+        if not token_price_usd or not sol_price_usd: # price in sol
             return jsonify({"status": "failed", "message": "Failed to fetch token or SOL price"}), 400
 
         # Calculate token amount to sell
@@ -203,6 +208,7 @@ def sell_token(trade_id):
         try:
             start_time = time.time()
             rpc_response = solana_client.send_transaction(signed_transaction)
+            # rpc_response = False
             end_time = time.time()
             execution_time_ms = (end_time - start_time) * 1000  # Convert to milliseconds
             signature = str(rpc_response.value)

@@ -14,6 +14,7 @@ from token_price import  token_price_bp
 from trade import solana_bp
 from user_register import user_register_bp
 from wallet_managment import wallet_bp
+from live_pricing import live_pricing_bp
 from menual_sell_token import manual_sell_trade_bp
 from flask_socketio import SocketIO
 from trade_history import trade_history_bp
@@ -93,6 +94,7 @@ app.register_blueprint(autosnipe_bp)
 app.register_blueprint(token_price_bp)
 app.register_blueprint(user_register_bp)
 app.register_blueprint(autosnipe_trade_bp)
+app.register_blueprint(live_pricing_bp)
 
 # app.register_blueprint(solana_auto_snipe_bp)
 

@@ -2,6 +2,98 @@ from moralis import sol_api
 from settings import moraliz_api_key, solana_client
 import requests
 from solders.pubkey import Pubkey
+from live_pricing import pump_price
+from flask import  jsonify
+import live_pricing
+
+def pump_price(mint):
+    """Compute token price in SOL using Pump.fun bonding-curve, falling back to PumpSwap pool.
+    """
+    mint = mint.strip()
+    if not mint:
+        return ({"status": "failed", "message": "Missing 'mint'"})
+
+    # 1) Try Pump.fun bonding-curve reserves at 8/16 like the JS reference
+    try:
+        mint_pk = Pubkey.from_string(mint)
+    except Exception as e:
+        return ({"status": "failed", "message": f"Invalid mint: {e}"})
+    # Fetch token metadata (name, symbol) via Metaplex on-chain
+    token_name, token_symbol = live_pricing._get_token_metadata_name_symbol(mint)
+
+    if token_name is None or token_symbol is None:
+        return None
+
+    bonding_pda = live_pricing._pumpfun_bonding_curve_pda(mint)
+    raw = live_pricing._get_account_data_bytes(bonding_pda)
+    if raw:
+        vt = live_pricing._read_u64_le(raw, 8)
+        vs = live_pricing._read_u64_le(raw, 16)
+        if vt > 0:
+            price = float(vs) / (float(vt) * 1000.0)
+            sol_price_usd = live_pricing._get_sol_price_usd_from_pyth()
+            resp = {
+                "source": "pumpfun",
+                "mint": mint,
+                "name": token_name,
+                "symbol": token_symbol,
+                "bondingcurve": str(bonding_pda),
+                "virtual_token_reserves": int(vt),
+                "virtual_sol_reserves": int(vs),
+                "price_in_sol": price,
+                "rpc_url": live_pricing.RPC_URL,
+            }
+            if sol_price_usd is not None:
+                resp["sol_price_usd"] = sol_price_usd
+                resp["usdPrice"] = price * sol_price_usd
+            return resp
+
+    # 2) Fallback to Pump AMM (PumpSwap) vault price
+    # pool-authority PDA: ["pool-authority", mint] under Pump.fun program
+    pool_auth_pda, _ = Pubkey.find_program_address([b"pool-authority", bytes(mint_pk)], live_pricing.PUMP_FUN_PROGRAM_ID)
+    # pool PDA: ["pool", indexLE16(0), pool_auth_pda, mint, wsol]
+    index_le16 = (0).to_bytes(2, byteorder="little", signed=False)
+    pool_pda, _ = Pubkey.find_program_address(
+        [b"pool", index_le16, bytes(pool_auth_pda), bytes(mint_pk), bytes(live_pricing.WSOL_MINT)],
+        live_pricing.PUMP_AMM_PROGRAM_ID
+    )
+    base_vault = live_pricing._get_associated_token_address(mint_pk, pool_pda)
+    quote_vault = live_pricing._get_associated_token_address(live_pricing.WSOL_MINT, pool_pda)
+
+    base_amt, base_dec = live_pricing._get_token_account_amount_and_decimals(str(base_vault))
+    quote_amt, quote_dec = live_pricing._get_token_account_amount_and_decimals(str(quote_vault))
+    if base_amt is None or quote_amt is None or base_dec is None or quote_dec is None or base_amt == 0:
+        return ({
+            "status": "failed",
+            "message": "Unable to fetch pool vault balances",
+            "pool": str(pool_pda),
+            "base_vault": str(base_vault),
+            "quote_vault": str(quote_vault),
+        })
+
+    base_reserve = base_amt / (10 ** base_dec) if base_dec else 0.0
+    quote_reserve = quote_amt / (10 ** quote_dec) if quote_dec else 0.0
+    if base_reserve <= 0:
+        return {"status": "failed", "message": "Base reserve is zero"}
+    price = quote_reserve / base_reserve
+    sol_price_usd = live_pricing._get_sol_price_usd_from_pyth()
+    resp = {
+        "source": "pumpswap",
+        "mint": mint,
+        "name": token_name,
+        "symbol": token_symbol,
+        "pool": str(pool_pda),
+        "base_vault": str(base_vault),
+        "quote_vault": str(quote_vault),
+        "base_reserve": base_reserve,
+        "quote_reserve": quote_reserve,
+        "price_in_sol": price,
+        "rpc_url": live_pricing.RPC_URL,
+    }
+    if sol_price_usd is not None:
+        resp["sol_price_usd"] = sol_price_usd
+        resp["usdPrice"] = price * sol_price_usd
+    return resp
 
 
 def get_token_symbol_and_price(token_mint: str):
@@ -10,11 +102,18 @@ def get_token_symbol_and_price(token_mint: str):
             "network": "mainnet",
             "address": token_mint
         }
-
-        result = sol_api.token.get_token_price(
-            api_key=moraliz_api_key,
-            params=params,
-        )
+        if token_mint.endswith("pump"):
+            result = pump_price(token_mint)
+            if result is None:
+                result = sol_api.token.get_token_price(
+                    api_key=moraliz_api_key,
+                    params=params,
+                )
+        else:
+            result = sol_api.token.get_token_price(
+                api_key=moraliz_api_key,
+                params=params,
+            )
         return result
     except Exception as e:
         return None

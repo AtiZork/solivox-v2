@@ -1,13 +1,13 @@
 from solana.rpc.api import Client
 
 # for local
-secure_directory = '/home/ahmad-mansoor/Desktop'  # Customize your path here
+secure_directory = r"C:\Users\LENONO\Documents\Musaddaq Data"  # Customize your path here
 #for live server
 # secure_directory = '/home/ubuntu' # Customize your path here
 # for live
 # Connect to your local Solana node
-#solana_client = Client("https://api.mainnet-beta.solana.com")
-solana_client = Client("http://127.0.0.1:8899")
+solana_client = Client("https://api.mainnet-beta.solana.com")
+# solana_client = Client("http://127.0.0.1:8899")
 SOLANA_WS_URL = Client("wss://api.mainnet-beta.solana.com")
 PUMP_FUN_PROGRAM_ID_STR = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
