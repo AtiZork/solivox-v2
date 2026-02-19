@@ -58,6 +58,11 @@ headers = {"x-api-key": API_KEY} if API_KEY else {}
 # SPL Token Program ID
 SPL_TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 
+from threading import Lock
+
+WALLET_BUY_LOCK = Lock()
+BOUGHT_TOKENS = set()
+
 
 def get_token_price_usd(token_address):
     try:
@@ -234,11 +239,13 @@ def price_usd_func(txn: dict) -> float:
     return amount * token_usd_price
 
 
-def should_buy_token(token_address: str, user_id: int) -> bool:
+# def should_buy_token(token_address: str, user_id: int) -> bool:
+def should_buy_token(token_address, user_id, config):
+
     """
     Checks if a token meets the buy conditions from AutoSnipeConfig for a user.
     """
-    config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
+    # config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
     if not config:
         print(f"  [Buy Condition] No active AutoSnipeConfig found for user {user_id}. Cannot determine buy conditions.")
         return False
@@ -258,7 +265,7 @@ def should_buy_token(token_address: str, user_id: int) -> bool:
 
         qualifying_txns_count = 0
         for txn in txns:
-            usd_value = txn.usd_value if txn.usd_value else 0.0
+            usd_value = txn['usd_value'] if txn['usd_value'] else 0.0
             if usd_value >= config.buy_txns_over_80_usd:
                 qualifying_txns_count += 1
         print(f"[Buy Condition] Current qualifying transactions: {qualifying_txns_count} / required: {config.min_txns}.")
@@ -271,14 +278,22 @@ def should_buy_token(token_address: str, user_id: int) -> bool:
     print(f"[Buy Condition] Buy conditions NOT MET for {token_address} within {check_duration} seconds.")
     return False
 
+def buy_token(token_address, config):
+    with WALLET_BUY_LOCK:
+        return _buy_token_internal(token_address, config)
 
-def buy_token(token_address: str, user_id: int) -> bool:
+# def _buy_token_internal(token_address: str, user_id: int) -> bool:
+def _buy_token_internal(token_address, config):
+
     global signature
     try:
-        config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
+        # config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
         if not config:
             logger.error(f"[Buy Token] No active AutoSnipeConfig found for user. Cannot proceed with buy.")
             return True
+        if token_address in BOUGHT_TOKENS:
+            logger.info(f"Token {token_address} already bought, skipping.")
+            return False
 
         # Fetch relevant settings from the AutoSnipeConfig
         # These are used for the actual swap execution parameters
@@ -286,7 +301,7 @@ def buy_token(token_address: str, user_id: int) -> bool:
         buy_slippage_percent_bps = int((config.slippage if config.slippage else 100) * 100) # Convert percentage to BPS
         priority_fee_sol = config.priority_fee if config.priority_fee else 0.01
 
-        wallet = Wallet.query.filter_by(user_id=user_id).first() # Assuming user_id can link to a wallet
+        wallet = Wallet.query.filter_by(user_id=config.user_id).first() # Assuming user_id can link to a wallet
         if not wallet:
             logger.error(f"Failed to fetch wallet for user.")
             return True
@@ -404,7 +419,7 @@ def buy_token(token_address: str, user_id: int) -> bool:
 
         # Create new Trade record with simplified fields
         new_trade = Trade(
-            user_id=int(user_id),
+            user_id=int(config.user_id),
             config_id=config.id,
             token_address=token_address,
             token_name=token_name,
@@ -458,17 +473,28 @@ def buy_token(token_address: str, user_id: int) -> bool:
         logger.error(f"An error occurred: {str(e)}")
         return True
 
-def autosnipe_buy_new_token(token_address: str, user_id: int) -> bool:
+# def autosnipe_buy_new_token(token_address: str, user_id: int) -> bool:
+def autosnipe_buy_new_token(token_address: str, config: AutoSnipeConfig) -> bool:
     """
     Orchestrates the check and buy process for a newly detected token.
     """
-    print(f"\n--- Initiating autosnipe check for token: {token_address} (User: {user_id}) ---")
-    if should_buy_token(token_address, user_id):
+    if not config.active:
+        return False
+
+    if should_buy_token(token_address, config.user_id, config):
         print(f"Token {token_address} met buy conditions. Attempting to buy...")
-        return buy_token(token_address, user_id)
+        return buy_token(token_address, config)
+        return buy_token(token_address, config.user_id)
     else:
         print(f"Token {token_address} did not meet buy conditions. Skipping buy.")
         return False
+    # print(f"\n--- Initiating autosnipe check for token: {token_address} (User: {user_id}) ---")
+    # if should_buy_token(token_address, user_id):
+    #     print(f"Token {token_address} met buy conditions. Attempting to buy...")
+    #     return buy_token(token_address, user_id)
+    # else:
+    #     print(f"Token {token_address} did not meet buy conditions. Skipping buy.")
+    #     return False
 
 # Initialize variables
 last_checked_slot = 0  # Start from slot 0
@@ -482,8 +508,9 @@ def detect_new_tokens_single_pass(last_checked_slot: int, processed_token_mints:
     from main import app
     with app.app_context():
         try:
-            config = AutoSnipeConfig.query.filter_by(active=True).first()
-            user_id = int(config.user_id)
+            # config = AutoSnipeConfig.query.filter_by(active=True).first()
+            configs = AutoSnipeConfig.query.filter_by(active=True).all()
+            # user_id = int(config.user_id)
             current_slot_response = solana_client.get_slot()
             current_slot = current_slot_response.value
 
@@ -499,6 +526,7 @@ def detect_new_tokens_single_pass(last_checked_slot: int, processed_token_mints:
             signatures = signatures_response.value
 
             new_mints_found_in_batch = set()
+            # new_mints_found_in_batch.add("6QaQZFFZkCCqE7UyAFRDBMhvKoui11nv3ugeBvn2pump")  # For testing purposes
 
             for siginfo in signatures:
                 signature = siginfo.signature
@@ -539,7 +567,9 @@ def detect_new_tokens_single_pass(last_checked_slot: int, processed_token_mints:
             # print(txns)
             for new_token_address in new_mints_found_in_batch:
                 print(f"[Detector] Attempting autosnipe for detected new token: {new_token_address}")
-                autosnipe_buy_new_token(new_token_address, user_id)
+                # autosnipe_buy_new_token(new_token_address, user_id)
+                for config in configs:
+                    autosnipe_buy_new_token(new_token_address, config)
             return current_slot
         except Exception as e:
             print(f"[Detector] An error occurred in detection pass: {e}")
@@ -547,7 +577,7 @@ def detect_new_tokens_single_pass(last_checked_slot: int, processed_token_mints:
 
 autosnipe_trade_bp = Blueprint('autosnipe_trade_bp', __name__)
 
-
+#
 # @autosnipe_trade_bp.route('/detect_new_tokens', methods=['POST'])
 # def detect_new_tokens():
 #     global last_checked_slot, processed_token_mints
@@ -570,8 +600,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 
 # Initialize variables
-last_checked_slot = 0  # Start from slot 0
-processed_token_mints = set()  # Create an empty set to track processed token mints
+# last_checked_slot = 0  # Start from slot 0
+# processed_token_mints = set()  # Create an empty set to track processed token mints
 
 def run_detector():
     global last_checked_slot, processed_token_mints
