@@ -90,6 +90,29 @@ class AutoSnipeConfig(db.Model):
     active = db.Column(db.Boolean, nullable=False, default=True)  # New field
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "active": bool(self.active),
+            "buy_txns_over_80_usd": self.buy_txns_over_80_usd,
+            "min_txns": self.min_txns,
+            "launch_delay": self.launch_delay,
+            "buy_amount": self.buy_amount,
+            "slippage": self.slippage,
+            "priority_fee": self.priority_fee,
+            "drop_cutoff": self.drop_cutoff,
+            "drop_until_profit": self.drop_until_profit,
+            "drop_after_100": self.drop_after_100,
+            "drop_after_400": self.drop_after_400,
+            "sell_at_200": self.sell_at_200,
+            "sell_at_400": self.sell_at_400,
+            "sell_at_1000": self.sell_at_1000,
+            "sell_at_1500": self.sell_at_1500,
+            "sell_at_2500": self.sell_at_2500,
+            "sell_at_4000": self.sell_at_4000,
+            "sell_at_10000": self.sell_at_10000,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+        }
 
 
 class TradeConfiguration(db.Model):

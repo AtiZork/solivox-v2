@@ -105,18 +105,18 @@ async def refresh_all_pools():
 
 
 # ---------- Run background task ----------
-def start_background_loop():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(refresh_all_pools())
-    loop.run_forever()
-
-
-# Start background pool sync thread (guard against Flask debug reloader)
-import threading
-
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("FLASK_RUN_FROM_CLI"):
-    threading.Thread(target=start_background_loop, daemon=True).start()
+# def start_background_loop():
+#     loop = asyncio.new_event_loop()
+#     asyncio.set_event_loop(loop)
+#     loop.create_task(refresh_all_pools())
+#     loop.run_forever()
+#
+#
+# # Start background pool sync thread (guard against Flask debug reloader)
+# import threading
+#
+# if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("FLASK_RUN_FROM_CLI"):
+#     threading.Thread(target=start_background_loop, daemon=True).start()
 
 
 # ---------- Live token price endpoint ----------
