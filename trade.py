@@ -230,7 +230,7 @@ def buy_token_trade():
                 trade_type="BUY",
                 trade_kind="LONG",
                 amount=amount,
-                execution_price=current_token_price,  # Use the fetched price
+                execution_price=current_token_price if current_token_price else 0,  # Use the fetched price
                 tx_id=signature
             )
             db.session.add(executed_trade)

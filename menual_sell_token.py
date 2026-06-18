@@ -92,7 +92,7 @@ def sell_token(trade_id):
 
         # Fetch token and SOL prices in USD
         current_token_price_ = get_token_symbol_and_price(token_address)
-        if current_token_price_.get("usdPrice") is not None and current_token_price_.get("sol_price_usd"):
+        if current_token_price_['usdPrice'] is not None and current_token_price_["sol_price_usd"]:
             token_price_usd = current_token_price_["usdPrice"]  # price in used
             sol_price_usd = current_token_price_["sol_price_usd"]
             if not sol_price_usd:

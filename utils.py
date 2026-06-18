@@ -96,25 +96,69 @@ def pump_price(mint):
     return resp
 
 
-def get_token_symbol_and_price(token_mint: str):
+def get_token_symbol_and_price(mint_address: str):
     try:
-        params = {
-            "network": "mainnet",
-            "address": token_mint
+        # Your Jupiter API Key
+        API_KEY = "jup_a1d0b05ce8142c073eb08772a4e6b3cb26449466bc702d5a949b3ebd1f8a32f6"
+
+        headers = {
+            "x-api-key": API_KEY
         }
-        if token_mint.endswith("pump"):
-            result = pump_price(token_mint)
-            if result is None:
-                result = sol_api.token.get_token_price(
-                    api_key=moraliz_api_key,
-                    params=params,
-                )
-        else:
-            result = sol_api.token.get_token_price(
-                api_key=moraliz_api_key,
-                params=params,
-            )
-        return result
+        # Step 1: Fetch Token Metadata (Name & Symbol)
+        metadata_url = f"https://api.jup.ag/tokens/v2/search?query={mint_address}"
+        meta_response = requests.get(metadata_url, headers=headers)
+
+        token_name = "Unknown"
+        token_symbol = "Unknown"
+
+        if meta_response.status_code == 200:
+            meta_data = meta_response.json()
+            # Tokens V2 search return an array/list of matching tokens
+            if meta_data and len(meta_data) > 0:
+                token_name = meta_data[0].get("name", "Unknown")
+                token_symbol = meta_data[0].get("symbol", "Unknown")
+
+        # Step 2: Fetch Token Price
+        price_url = f"https://api.jup.ag/price/v3?ids={mint_address}"
+        price_response = requests.get(price_url, headers=headers)
+
+        if price_response.status_code == 200:
+            price_data_ = price_response.json()
+
+            # Extract matching data mapping cleanly
+            if price_data_ and mint_address in price_data_:
+                data = price_data_[mint_address]
+
+                # Format price to 4 digits after dot
+                if "usdPrice" in data and data["usdPrice"] is not None:
+                    data["usdPrice"] = round(float(data["usdPrice"]), 6)
+
+                # Inject metadata into the final response
+                data["name"] = token_name
+                data["symbol"] = token_symbol
+
+                print(data)
+                return data
+            else:
+                print("Price data not found for this mint address.")
+                return None
+        # params = {
+        #     "network": "mainnet",
+        #     "address": token_mint
+        # }
+        # if token_mint.endswith("pump"):
+        #     result = pump_price(token_mint)
+        #     if result is None:
+        #         result = sol_api.token.get_token_price(
+        #             api_key=moraliz_api_key,
+        #             params=params,
+        #         )
+        # else:
+        #     result = sol_api.token.get_token_price(
+        #         api_key=moraliz_api_key,
+        #         params=params,
+        #     )
+        # return result
     except Exception as e:
         return None
 
