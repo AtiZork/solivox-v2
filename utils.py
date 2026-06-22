@@ -95,8 +95,74 @@ def pump_price(mint):
         resp["usdPrice"] = price * sol_price_usd
     return resp
 
-
 def get_token_symbol_and_price(mint_address: str):
+    try:
+        API_KEY = "jup_a1d0b05ce8142c073eb08772a4e6b3cb26449466bc702d5a949b3ebd1f8a32f6"
+
+        headers = {
+            "x-api-key": API_KEY
+        }
+
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+
+        # Token Metadata
+        metadata_url = f"https://api.jup.ag/tokens/v2/search?query={mint_address}"
+        meta_response = requests.get(metadata_url, headers=headers)
+
+        token_name = "Unknown"
+        token_symbol = "Unknown"
+
+        if meta_response.status_code == 200:
+            meta_data = meta_response.json()
+
+            if meta_data and len(meta_data) > 0:
+                token_name = meta_data[0].get("name", "Unknown")
+                token_symbol = meta_data[0].get("symbol", "Unknown")
+
+        # Token Price + SOL Price
+        price_url = f"https://api.jup.ag/price/v3?ids={mint_address},{SOL_MINT}"
+        price_response = requests.get(price_url, headers=headers)
+
+        if price_response.status_code == 200:
+            price_data = price_response.json()
+
+            if mint_address in price_data:
+
+                token_data = price_data[mint_address]
+
+                # Token USD Price
+                token_usd_price = round(
+                    float(token_data.get("usdPrice", 0)),
+                    6
+                )
+
+                # SOL USD Price
+                sol_usd_price = None
+
+                if SOL_MINT in price_data:
+                    sol_usd_price = round(
+                        float(price_data[SOL_MINT].get("usdPrice", 0)),
+                        6
+                    )
+
+                result = {
+                    **token_data,
+                    "usdPrice": token_usd_price,
+                    "name": token_name,
+                    "symbol": token_symbol,
+                    "sol_price_usd": sol_usd_price
+                }
+
+                print(result)
+                return result
+
+        return None
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+def get_token_symbol_and_prices(mint_address: str):
     try:
         # Your Jupiter API Key
         API_KEY = "jup_a1d0b05ce8142c073eb08772a4e6b3cb26449466bc702d5a949b3ebd1f8a32f6"
