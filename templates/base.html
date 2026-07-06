@@ -121,7 +121,7 @@
                 <div class="collapse navbar-collapse justify-content-between">
                     <div class="header-left">
                         <div class="dashboard_bar">
-                            Dashboard
+                            {{ page_title | default('Dashboard') }}
                         </div>
                     </div>
                     <ul class="navbar-nav header-right">
@@ -533,7 +533,8 @@
                         <!--							<li><a href="index-3.html">Dashboard &nbsp; 3</a></li>-->
                         <!--							<li><a href="index-4.html">Dashboard Dark</a></li>-->
                         <!--							<li><a href="coin-details.html">Coin Details</a></li>-->
-                        <li><a href="/">Home</a></li>
+                        <li><a href="/"{% if trades_filter | default('confirmed') == 'confirmed' %} class="mm-active"{% endif %}>Home</a></li>
+                        <li><a href="/pending-trades"{% if trades_filter | default('confirmed') == 'pending' %} class="mm-active"{% endif %}>Pending Trades</a></li>
                         <li><a href="dashboard">Dashboard</a></li>
                         <li><a href="auto-snipe">AutoSnipe</a></li>
                         <li><a href="my-wallets">My Wallets</a></li>
@@ -616,7 +617,7 @@
                     </form>
 
             <div>
-                <h5 class="my-3">TRANSACTIONS</h5>
+                <h5 class="my-3">{{ section_title | default('TRANSACTIONS') }}</h5>
                 <div id="transactionCards" class="row mt-3"></div>
                 <!-- Edit Modal -->
                 <div class="modal fade" id="editModal" tabindex="-1" aria-labelledby="editModalLabel"
@@ -828,6 +829,7 @@
 <!--<script src="/static/js/js/styleSwitcher.js"></script>-->
 <script src="/static/js/js/wallet.js"></script>
 <script src="/static/js/js/dashboard.js"></script>
+<script>window.TRADES_FILTER = "{{ trades_filter | default('confirmed') }}";</script>
 <script src="/static/js/js/Trading.js"></script>
 <script src="/static/js/js/tradeConfig.js"></script>
 <script src="/static/js/js/LongTrade.js"></script>

@@ -136,6 +136,9 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
         .then(response => response.json())
         .then(data => {
             alert(data.message);
+            const modal = bootstrap.Modal.getInstance(document.getElementById("editModal"));
+            if (modal) modal.hide();
+            fetchTransactions();
         })
         .catch(error => {
             console.error("Error submitting form:", error);
@@ -144,10 +147,25 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
 });
 
 
+function isPendingTrade(transaction) {
+    return transaction.trade_type === "BUY" && transaction.buy_token_if_price === true;
+}
+
+function getTradesFilter() {
+    return window.TRADES_FILTER || "confirmed";
+}
+
+function filterTransactions(transactions) {
+    if (getTradesFilter() === "pending") {
+        return transactions.filter(isPendingTrade);
+    }
+    return transactions.filter(t => !isPendingTrade(t));
+}
+
 // Function to fetch transactions from API
 async function fetchTransactions() {
-    const apiUrl = "/get_trades"; // Replace with actual API
-    const token = localStorage.getItem("token"); // or wherever it's stored
+    const apiUrl = "/get_trades";
+    const token = localStorage.getItem("token");
     try {
         const response = await fetch(apiUrl, {
             method: "GET",
@@ -156,23 +174,25 @@ async function fetchTransactions() {
                 "Content-Type": "application/json"
             }
         });
-        // const response = await fetch(apiUrl);
         if (!response.ok) {
             throw new Error(`API Error: ${response.statusText}`);
         }
         const transactions = await response.json();
-        console.log(transactions);
+        const filteredTransactions = filterTransactions(transactions);
         const container = document.getElementById("transactionCards");
         if (!container) {
             console.error("Container with ID 'transactionCards' not found!");
             return;
         }
-        container.innerHTML = ""; // Clear previous transactions
-        if (transactions.length === 0) {
-            container.innerHTML = '<p style="text-align: center; font-size: 18px; color: gray;">No transactions found.</p>';
+        container.innerHTML = "";
+        if (filteredTransactions.length === 0) {
+            const emptyMessage = getTradesFilter() === "pending"
+                ? "No pending transactions found."
+                : "No confirmed transactions found.";
+            container.innerHTML = `<p style="text-align: center; font-size: 18px; color: gray;">${emptyMessage}</p>`;
             return;
         }
-        transactions.forEach(displayTransaction);
+        filteredTransactions.forEach(displayTransaction);
         // Attach event listeners after rendering
         document.querySelectorAll(".copy-btn").forEach(button => {
             button.addEventListener("click", () => {
@@ -210,7 +230,7 @@ function openEditModal(value) {
         return;
     }
     transactionId = transaction.id;
-    const isPending = transaction.trade_type === "BUY" && transaction.buy_token_if_price === true;
+    const isPending = isPendingTrade(transaction);
     if (isPending) {
         document.getElementById("buyIfFields").classList.remove("d-none");
         document.getElementById("buyIfPriceUp").value = transaction.buy_if_price_up || '';
@@ -251,8 +271,7 @@ function displayTransaction(transaction) {
     // Create card element
     const card = document.createElement("div");
     card.classList.add("col-xl-4", "col-lg-6", "col-md-6", "col-12");
-    // Determine status based on conditions
-    const status = transaction.trade_type === 'BUY' && transaction.buy_token_if_price
+    const status = isPendingTrade(transaction)
         ? '<span class="badge bg-warning text-dark">Pending</span>'
         : '<span class="badge bg-success">Confirmed</span>';
     card.innerHTML = `
