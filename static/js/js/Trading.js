@@ -92,35 +92,46 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
     }
 
     let isValid = true;
+    let requestData;
 
-    // Prepare requestData
-    const requestData = {
-        sell_100_at_30_percent_drop: parseFloat(document.getElementById("updateSellBuyPriceNegative").value),
-        sell_100_after_100_percent_profit_drop: parseFloat(document.getElementById("updateSellAllPriceNegative").value),
-        sell_at_200_percent_profit: parseFloat(document.getElementById("updateSellAfter200").value),
-        sell_at_300_percent_profit: parseFloat(document.getElementById("updateSellAfter300").value),
-        sell_at_500_percent_profit: parseFloat(document.getElementById("updateSellAfter500").value),
-        sell_at_1000_percent_profit: parseFloat(document.getElementById("updateSellAfter1000").value),
-        sell_at_2000_percent_profit: parseFloat(document.getElementById("updateSellAfter2000").value),
-        sell_at_10000_percent_profit: parseFloat(document.getElementById("updateSellAfter10000").value),
-        buy_gas_fee: parseFloat(document.getElementById("updateBuyGasSol").value),
-        buy_slippage: parseFloat(document.getElementById("updateBuySlippage").value),
-        sell_gas_fee: parseFloat(document.getElementById("updateSellGasSol").value),
-        sell_slippage: parseFloat(document.getElementById("updateSellSlippage").value),
-        buy_if_price_up: parseFloat(document.getElementById("buyIfPriceUp").value),
-        buy_if_price_down: parseFloat(document.getElementById("buyIfPriceDown").value),
-    };
+    if (editingIsSniper) {
+        requestData = {
+            drop_cutoff: parseFloat(document.getElementById("updateDropCutoff").value),
+            drop_until_profit: parseFloat(document.getElementById("updateDropUntilProfit").value),
+            drop_after_100: parseFloat(document.getElementById("updateDropAfter100").value),
+            drop_after_400: parseFloat(document.getElementById("updateDropAfter400").value),
+            sell_at_200: parseFloat(document.getElementById("updateSellAt200").value),
+            sell_at_400: parseFloat(document.getElementById("updateSellAt400").value),
+            sell_at_1000: parseFloat(document.getElementById("updateSellAt1000").value),
+            sell_at_1500: parseFloat(document.getElementById("updateSellAt1500").value),
+            sell_at_2500: parseFloat(document.getElementById("updateSellAt2500").value),
+            sell_at_4000: parseFloat(document.getElementById("updateSellAt4000").value),
+            sell_at_10000: parseFloat(document.getElementById("updateSellAt10000").value),
+            autosnipe_sell_slippage: parseFloat(document.getElementById("updateAutosnipeSellSlippage").value),
+        };
+    } else {
+        requestData = {
+            sell_100_at_30_percent_drop: parseFloat(document.getElementById("updateSellBuyPriceNegative").value),
+            sell_100_after_100_percent_profit_drop: parseFloat(document.getElementById("updateSellAllPriceNegative").value),
+            sell_at_200_percent_profit: parseFloat(document.getElementById("updateSellAfter200").value),
+            sell_at_300_percent_profit: parseFloat(document.getElementById("updateSellAfter300").value),
+            sell_at_500_percent_profit: parseFloat(document.getElementById("updateSellAfter500").value),
+            sell_at_1000_percent_profit: parseFloat(document.getElementById("updateSellAfter1000").value),
+            sell_at_2000_percent_profit: parseFloat(document.getElementById("updateSellAfter2000").value),
+            sell_at_10000_percent_profit: parseFloat(document.getElementById("updateSellAfter10000").value),
+            buy_gas_fee: parseFloat(document.getElementById("updateBuyGasSol").value),
+            buy_slippage: parseFloat(document.getElementById("updateBuySlippage").value),
+            sell_gas_fee: parseFloat(document.getElementById("updateSellGasSol").value),
+            sell_slippage: parseFloat(document.getElementById("updateSellSlippage").value),
+            buy_if_price_up: parseFloat(document.getElementById("buyIfPriceUp").value),
+            buy_if_price_down: parseFloat(document.getElementById("buyIfPriceDown").value),
+        };
+    }
 
     // Validate inputs
     Object.entries(requestData).forEach(([key, value]) => {
-        const input = document.getElementById(key);
-        if (input && !input.readOnly) {
-            if (value === "" || isNaN(value)) {
-                isValid = false;
-                input.style.border = "2px solid red";
-            } else {
-                input.style.border = "";
-            }
+        if (value === "" || isNaN(value)) {
+            isValid = false;
         }
     });
 
@@ -149,6 +160,10 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
 
 function isPendingTrade(transaction) {
     return transaction.trade_type === "BUY" && transaction.buy_token_if_price === true;
+}
+
+function isSniperTrade(transaction) {
+    return transaction.auto_snipe === true || transaction.trade_kind === "AUTOSNIPE";
 }
 
 function getTradesFilter() {
@@ -214,6 +229,19 @@ async function fetchTransactions() {
 }
 
 let transactionId = null;
+let editingIsSniper = false;
+
+function setEditModalMode(isSniper) {
+    const longFields = document.getElementById("longSellFields");
+    const sniperFields = document.getElementById("sniperSellFields");
+    const modalTitle = document.getElementById("editModalLabel");
+    if (longFields) longFields.classList.toggle("d-none", isSniper);
+    if (sniperFields) sniperFields.classList.toggle("d-none", !isSniper);
+    if (modalTitle) {
+        modalTitle.textContent = isSniper ? "Edit Transaction (Sniper)" : "Edit Transaction (Long)";
+    }
+}
+
 // Function to open the edit modal
 function openEditModal(value) {
     let transaction;
@@ -230,33 +258,50 @@ function openEditModal(value) {
         return;
     }
     transactionId = transaction.id;
-    const isPending = isPendingTrade(transaction);
-    if (isPending) {
-        document.getElementById("buyIfFields").classList.remove("d-none");
-        document.getElementById("buyIfPriceUp").value = transaction.buy_if_price_up || '';
-        document.getElementById("buyIfPriceDown").value = transaction.buy_if_price_down || '';
-    } else {
-        document.getElementById("buyIfFields").classList.add("d-none");
-    }
-    // Set the token address inside the modal input field (or wherever required)
+    editingIsSniper = isSniperTrade(transaction);
+    setEditModalMode(editingIsSniper);
+
     document.getElementById("editTokenAddress").value = transaction.token_address || "";
     document.getElementById("editAmount").value = transaction.amount || "";
     document.getElementById("editInitialPrice").value = transaction.initial_price || "";
-    document.getElementById("updateSellBuyPriceNegative").value = transaction.sell_100_at_30_percent_drop || 30;
-    document.getElementById("updateSellAllPriceNegative").value = transaction.sell_100_after_100_percent_profit_drop || 30;
-    document.getElementById("updateSellAfter200").value = transaction.sell_at_200_percent_profit || 10;
-    document.getElementById("updateSellAfter300").value = transaction.sell_at_300_percent_profit || 10;
-    document.getElementById("updateSellAfter500").value = transaction.sell_at_500_percent_profit || 10;
-    document.getElementById("updateSellAfter1000").value = transaction.sell_at_1000_percent_profit || 10;
-    document.getElementById("updateSellAfter2000").value = transaction.sell_at_2000_percent_profit || 10;
-    document.getElementById("updateSellAfter10000").value = transaction.sell_at_10000_percent_profit || 10;
-    document.getElementById("updateBuyGasSol").value = transaction.buy_gas_fee || 0.001;
-    document.getElementById("updateBuySlippage").value = transaction.buy_slippage || 30;
-    document.getElementById("updateSellGasSol").value = transaction.sell_gas_fee || 0.001;
-    document.getElementById("updateSellSlippage").value = transaction.sell_slippage || 30;
-    document.getElementById("buyIfPriceUp").value = transaction.buy_if_price_up || 0;
-    document.getElementById("buyIfPriceDown").value = transaction.buy_if_price_down || 0;
 
+    if (editingIsSniper) {
+        document.getElementById("updateDropCutoff").value = transaction.drop_cutoff ?? 30;
+        document.getElementById("updateDropUntilProfit").value = transaction.drop_until_profit ?? 99;
+        document.getElementById("updateDropAfter100").value = transaction.drop_after_100 ?? 50;
+        document.getElementById("updateDropAfter400").value = transaction.drop_after_400 ?? 30;
+        document.getElementById("updateSellAt200").value = transaction.sell_at_200 ?? 10;
+        document.getElementById("updateSellAt400").value = transaction.sell_at_400 ?? 10;
+        document.getElementById("updateSellAt1000").value = transaction.sell_at_1000 ?? 10;
+        document.getElementById("updateSellAt1500").value = transaction.sell_at_1500 ?? 10;
+        document.getElementById("updateSellAt2500").value = transaction.sell_at_2500 ?? 10;
+        document.getElementById("updateSellAt4000").value = transaction.sell_at_4000 ?? 10;
+        document.getElementById("updateSellAt10000").value = transaction.sell_at_10000 ?? 10;
+        document.getElementById("updateAutosnipeSellSlippage").value = transaction.autosnipe_sell_slippage ?? 30;
+    } else {
+        const isPending = isPendingTrade(transaction);
+        if (isPending) {
+            document.getElementById("buyIfFields").classList.remove("d-none");
+            document.getElementById("buyIfPriceUp").value = transaction.buy_if_price_up || '';
+            document.getElementById("buyIfPriceDown").value = transaction.buy_if_price_down || '';
+        } else {
+            document.getElementById("buyIfFields").classList.add("d-none");
+        }
+        document.getElementById("updateSellBuyPriceNegative").value = transaction.sell_100_at_30_percent_drop || 30;
+        document.getElementById("updateSellAllPriceNegative").value = transaction.sell_100_after_100_percent_profit_drop || 30;
+        document.getElementById("updateSellAfter200").value = transaction.sell_at_200_percent_profit || 10;
+        document.getElementById("updateSellAfter300").value = transaction.sell_at_300_percent_profit || 10;
+        document.getElementById("updateSellAfter500").value = transaction.sell_at_500_percent_profit || 10;
+        document.getElementById("updateSellAfter1000").value = transaction.sell_at_1000_percent_profit || 10;
+        document.getElementById("updateSellAfter2000").value = transaction.sell_at_2000_percent_profit || 10;
+        document.getElementById("updateSellAfter10000").value = transaction.sell_at_10000_percent_profit || 10;
+        document.getElementById("updateBuyGasSol").value = transaction.buy_gas_fee || 0.001;
+        document.getElementById("updateBuySlippage").value = transaction.buy_slippage || 30;
+        document.getElementById("updateSellGasSol").value = transaction.sell_gas_fee || 0.001;
+        document.getElementById("updateSellSlippage").value = transaction.sell_slippage || 30;
+        document.getElementById("buyIfPriceUp").value = transaction.buy_if_price_up || 0;
+        document.getElementById("buyIfPriceDown").value = transaction.buy_if_price_down || 0;
+    }
 
     // Show the modal
     const modalInstance = new bootstrap.Modal(modal);
@@ -274,10 +319,14 @@ function displayTransaction(transaction) {
     const status = isPendingTrade(transaction)
         ? '<span class="badge bg-warning text-dark">Pending</span>'
         : '<span class="badge bg-success">Confirmed</span>';
+    const sourceBadge = isSniperTrade(transaction)
+        ? '<span class="badge bg-info text-dark">Sniper</span>'
+        : '<span class="badge bg-secondary">Long</span>';
+    const safeTokenData = JSON.stringify(transaction).replace(/'/g, "&#39;");
     card.innerHTML = `
         <div class="card shadow-sm border">
             <div class="card-body">
-                    <button class="edit-btn" data-token='${JSON.stringify(transaction)}'>
+                    <button class="edit-btn" data-token='${safeTokenData}'>
                         <i class="fas fa-edit"></i>
                     </button>
                 
@@ -304,7 +353,10 @@ function displayTransaction(transaction) {
                     </button>
                 </div>
                 <p class="card-text"><strong>Created At:</strong> ${transaction.created_at}</p>
-                <p class="card-text"><strong>Status:</strong> ${status}</p>
+                <div class="d-flex align-items-center justify-content-between">
+                    <p class="card-text mb-0"><strong>Status:</strong> ${status}</p>
+                    ${sourceBadge}
+                </div>
             </div>
         </div>
     `;

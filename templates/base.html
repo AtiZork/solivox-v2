@@ -645,7 +645,7 @@
                                         <input type="text" class="form-control" id="editInitialPrice" readonly
                                                placeholder="Enter price">
                                     </div>
-                                    <div class="row">
+                                    <div id="longSellFields" class="row">
                                         <div class="col-xl-6 col-sm-6">
                                             <div class="mb-2">
                                                 <label for="updateSellBuyPriceNegative" class="form-label">Sell all if buy price -ve</label>
@@ -775,6 +775,119 @@
                                                 <div class="form-group col-6">
                                                     <label for="buyIfPriceDown" class="form-label">Buy If Price Down</label>
                                                     <input type="number" class="form-control" step="any" id="buyIfPriceDown" />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div id="sniperSellFields" class="row d-none">
+                                        <div class="col-12 mb-2">
+                                            <h6 class="mb-0">Sniper Sell Configuration</h6>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateDropCutoff" class="form-label">Sell - drop cutoff (%)</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateDropCutoff" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateDropUntilProfit" class="form-label">Sell - until profit reaches (%)</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateDropUntilProfit" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateDropAfter100" class="form-label">Sell - after 100% profit, sell if drops (%)</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateDropAfter100" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateDropAfter400" class="form-label">Sell - after 400% profit, sell if drops (%)</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateDropAfter400" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateSellAt200" class="form-label">At 200% profit, sell %</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateSellAt200" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateSellAt400" class="form-label">At 400% profit, sell %</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateSellAt400" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateSellAt1000" class="form-label">At 1000% profit, sell %</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateSellAt1000" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateSellAt1500" class="form-label">At 1500% profit, sell %</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateSellAt1500" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateSellAt2500" class="form-label">At 2500% profit, sell %</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateSellAt2500" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateSellAt4000" class="form-label">At 4000% profit, sell %</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateSellAt4000" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateSellAt10000" class="form-label">At 10000% profit, sell %</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateSellAt10000" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-xl-6 col-sm-6">
+                                            <div class="mb-2">
+                                                <label for="updateAutosnipeSellSlippage" class="form-label">Sell Slippage</label>
+                                                <div class="input-group">
+                                                    <input type="number" id="updateAutosnipeSellSlippage" class="form-control" step="any">
+                                                    <span class="input-group-text">%</span>
                                                 </div>
                                             </div>
                                         </div>

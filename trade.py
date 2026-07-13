@@ -256,6 +256,7 @@ def get_trades():
         trade_list = []
 
         for trade in trades:
+            is_sniper = bool(trade.auto_snipe)
             base_trade_data = {
                 "id": trade.id,
                 "to_pubkey": trade.to_pubkey,
@@ -267,9 +268,11 @@ def get_trades():
                 "title": trade.token_name,
                 "token_symbol": trade.token_symbol,
                 "created_at": trade.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                "auto_snipe": is_sniper,
+                "trade_kind": trade.trade_kind or ("AUTOSNIPE" if is_sniper else "LONG"),
             }
 
-            # LONG Auto-sell conditions
+            # LONG Auto-sell conditions (always included for Long trades / compatibility)
             base_trade_data.update({
                 "sell_100_at_30_percent_drop": trade.sell_100_at_30_percent_drop,
                 "sell_100_after_100_percent_profit_drop": trade.sell_100_after_100_percent_profit_drop,
@@ -287,6 +290,22 @@ def get_trades():
                 "sell_gas_fee": trade.long_sell_gas_fee,
                 "buy_now": trade.buy_now,
                 "buy_token_if_price": trade.buy_token_if_price,
+            })
+
+            # Sniper Auto-sell conditions (saved on Trade at buy time)
+            base_trade_data.update({
+                "drop_cutoff": trade.drop_cutoff,
+                "drop_until_profit": trade.drop_until_profit,
+                "drop_after_100": trade.drop_after_100,
+                "drop_after_400": trade.drop_after_400,
+                "sell_at_200": trade.sell_at_200,
+                "sell_at_400": trade.sell_at_400,
+                "sell_at_1000": trade.sell_at_1000,
+                "sell_at_1500": trade.sell_at_1500,
+                "sell_at_2500": trade.sell_at_2500,
+                "sell_at_4000": trade.sell_at_4000,
+                "sell_at_10000": trade.sell_at_10000,
+                "autosnipe_sell_slippage": trade.autosnipe_sell_slippage,
             })
 
             trade_list.append(base_trade_data)
@@ -331,6 +350,19 @@ def update_trade(trade_id):
             "sell_at_10000_percent_profit": "sell_at_10000_percent_profit",
             "buy_if_price_up": "buy_if_price_up",
             "buy_if_price_down": "buy_if_price_down",
+            # Sniper sell configuration
+            "drop_cutoff": "drop_cutoff",
+            "drop_until_profit": "drop_until_profit",
+            "drop_after_100": "drop_after_100",
+            "drop_after_400": "drop_after_400",
+            "sell_at_200": "sell_at_200",
+            "sell_at_400": "sell_at_400",
+            "sell_at_1000": "sell_at_1000",
+            "sell_at_1500": "sell_at_1500",
+            "sell_at_2500": "sell_at_2500",
+            "sell_at_4000": "sell_at_4000",
+            "sell_at_10000": "sell_at_10000",
+            "autosnipe_sell_slippage": "autosnipe_sell_slippage",
         }
 
         # # Apply updates based on mapping
