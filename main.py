@@ -45,7 +45,12 @@ def get_logs_from_db():
 
 @app.route('/')
 def index():
-    return render_template('base.html')
+    return render_template('base.html', trades_filter='confirmed')
+
+
+@app.route('/pending-trades')
+def pending_trades():
+    return render_template('base.html', trades_filter='pending')
 
 @app.route('/auto-snipe')
 def autosnipe():
@@ -132,5 +137,9 @@ if __name__ == "__main__":
        from long_sell_trade import long_auto_sell_schedular
 
        long_auto_sell_schedular(app)
-   socketio.run(app, host="0.0.0.0", port=5000, debug=True, allow_unsafe_werkzeug=True)
+
+       from autosnipe_buy_new_token import start_sniper_ingestion
+
+       start_sniper_ingestion()
+   socketio.run(app, host="0.0.0.0", port=8000, debug=True, allow_unsafe_werkzeug=True)
     # app.run(host="0.0.0.0", port=8000, debug=True)

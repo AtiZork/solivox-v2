@@ -10,12 +10,12 @@ from solders.pubkey import Pubkey
 from solana.rpc.api import Client
 from dotenv import load_dotenv
 
+from settings import SOLANA_RPC_URL
+
 live_pricing_bp = Blueprint('live_pricing_bp', __name__)
 
-# Load env vars from .env, then prefer RPC_API like the Node.js script
-load_dotenv()
-# RPC_URL = os.getenv("RPC_API", "http://127.0.0.1:8899")
-RPC_URL = os.getenv("RPC_API", "https://api.mainnet-beta.solana.com")
+# Prefer shared settings (local node on server, mainnet on dev)
+RPC_URL = os.getenv("RPC_API", SOLANA_RPC_URL)
 
 DEX_PROGRAMS = {
     "Raydium": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
