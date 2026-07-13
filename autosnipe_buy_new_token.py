@@ -10,7 +10,7 @@ from requests import JSONDecodeError
 from solana.rpc.core import RPCException
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
-from settings import solana_client
+from settings import solana_client, SNIPER_USE_WEBSOCKET, SNIPER_HTTP_FALLBACK
 from utils import get_token_symbol_and_price
 from solders.pubkey import Pubkey
 
@@ -244,21 +244,51 @@ def should_buy_token(token_address, user_id, config):
 
     """
     Checks if a token meets the buy conditions from AutoSnipeConfig for a user.
+    Phase 1: uses WebSocket stream counters when the sniper WS listener is active.
+    Falls back to HTTP transaction fetching when WebSocket is disabled.
     """
     # config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
     if not config:
         print(f"  [Buy Condition] No active AutoSnipeConfig found for user {user_id}. Cannot determine buy conditions.")
         return False
 
-    start_time = time.time()
     check_duration = config.launch_delay  # seconds
     print(
-        f"  [Buy Condition] Checking buy conditions for {token_address} for user {user_id} for max {check_duration} seconds...")
+        f"  [Buy Condition] Checking buy conditions for {token_address} for user {user_id} "
+        f"for max {check_duration} seconds..."
+    )
 
+    # --- WebSocket path: read in-memory counters (no HTTP polling) ---
+    try:
+        from sniper_stream import get_mint_buy_stats, is_ws_active
+
+        if is_ws_active():
+            start_time = time.time()
+            while time.time() - start_time < check_duration:
+                stats = get_mint_buy_stats(token_address, config.buy_txns_over_80_usd)
+                qualifying = stats["qualifying_count"]
+                print(
+                    f"[Buy Condition][WS] qualifying={qualifying} / required={config.min_txns} "
+                    f"(total buys={stats['total_buys']})"
+                )
+                if qualifying >= config.min_txns:
+                    print(
+                        f"[Buy Condition][WS] Buy conditions MET for {token_address}: "
+                        f"{qualifying} transactions >= ${config.buy_txns_over_80_usd}."
+                    )
+                    return True
+                time.sleep(0.2)
+            print(f"[Buy Condition][WS] Buy conditions NOT MET for {token_address} within {check_duration}s.")
+            return False
+    except ImportError:
+        pass
+
+    # --- HTTP fallback (legacy polling) ---
+    start_time = time.time()
     while time.time() - start_time < check_duration:
-        # token_address = 'So11111111111111111111111111111111111111112'
-        # txns = get_token_transactions(token_address, config.min_txns)  # Fetch more than min_txns to ensure we have enough to check
-        txns = get_token_specific_transactions(token_address, config.min_txns, config.buy_txns_over_80_usd)  # Fetch more than min_txns to ensure we have enough to check
+        txns = get_token_specific_transactions(
+            token_address, config.min_txns, config.buy_txns_over_80_usd
+        )
         if not txns:
             time.sleep(1)
             continue
@@ -268,14 +298,14 @@ def should_buy_token(token_address, user_id, config):
             usd_value = txn['usd_value'] if txn['usd_value'] else 0.0
             if usd_value >= config.buy_txns_over_80_usd:
                 qualifying_txns_count += 1
-        print(f"[Buy Condition] Current qualifying transactions: {qualifying_txns_count} / required: {config.min_txns}.")
+        print(f"[Buy Condition][HTTP] Current qualifying transactions: {qualifying_txns_count} / required: {config.min_txns}.")
 
         if qualifying_txns_count >= config.min_txns:
-            print(f"[Buy Condition] Buy conditions MET for {token_address}: {qualifying_txns_count} transactions >= ${config.buy_txns_over_80_usd}.")
+            print(f"[Buy Condition][HTTP] Buy conditions MET for {token_address}: {qualifying_txns_count} transactions >= ${config.buy_txns_over_80_usd}.")
             return True
         time.sleep(1)
 
-    print(f"[Buy Condition] Buy conditions NOT MET for {token_address} within {check_duration} seconds.")
+    print(f"[Buy Condition][HTTP] Buy conditions NOT MET for {token_address} within {check_duration} seconds.")
     return False
 
 def buy_token(token_address, config):
@@ -420,7 +450,7 @@ def _buy_token_internal(token_address, config):
         # Create new Trade record with simplified fields
         new_trade = Trade(
             user_id=int(config.user_id),
-            config_id=config.id,
+            config_id=None,
             token_address=token_address,
             token_name=token_name,
             token_symbol=token_symbol,
@@ -502,6 +532,7 @@ processed_token_mints = set()  # Create an empty set to track processed token mi
 
 def detect_new_tokens_single_pass(last_checked_slot: int, processed_token_mints: set) -> int:
     """
+    Legacy HTTP polling detector (fallback when WebSocket is unavailable).
     Performs a single pass of detecting new SPL token mints and triggering autosnipe.
     Returns the current slot after checking.
     """
@@ -577,6 +608,36 @@ def detect_new_tokens_single_pass(last_checked_slot: int, processed_token_mints:
 
 autosnipe_trade_bp = Blueprint('autosnipe_trade_bp', __name__)
 
+
+@autosnipe_trade_bp.route('/api/sniper/stream-status', methods=['GET'])
+def sniper_stream_status():
+    """Health check for Phase 1 WebSocket sniper ingestion."""
+    try:
+        from sniper_stream import stream_state, is_ws_active
+        return jsonify({
+            "status": "ok",
+            **stream_state.status(),
+            "ws_listener_active": is_ws_active(),
+            "use_websocket": SNIPER_USE_WEBSOCKET,
+            "http_fallback": SNIPER_HTTP_FALLBACK,
+        })
+    except ImportError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+@autosnipe_trade_bp.route('/api/price/stream-status', methods=['GET'])
+def price_stream_status_api():
+    """Health check for dashboard live pricing WebSocket."""
+    try:
+        from price_stream import price_stream_status, is_price_ws_active
+        return jsonify({
+            "status": "ok",
+            **price_stream_status(),
+            "ws_listener_active": is_price_ws_active(),
+        })
+    except ImportError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
 #
 # @autosnipe_trade_bp.route('/detect_new_tokens', methods=['POST'])
 # def detect_new_tokens():
@@ -599,20 +660,92 @@ autosnipe_trade_bp = Blueprint('autosnipe_trade_bp', __name__)
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 
-# Initialize variables
-# last_checked_slot = 0  # Start from slot 0
-# processed_token_mints = set()  # Create an empty set to track processed token mints
+_http_scheduler = None
+_ingestion_started = False
+
+
+def stop_http_fallback_scheduler() -> None:
+    """Stop legacy HTTP polling scheduler when WebSocket is active."""
+    global _http_scheduler
+    if _http_scheduler and _http_scheduler.running:
+        _http_scheduler.shutdown(wait=False)
+        print("[HTTP Fallback] Stopped — WebSocket ingestion is active.")
+    _http_scheduler = None
+
+
+def _handle_ws_new_token(mint: str) -> None:
+    """Called by sniper_stream when a new Pump.fun Create is detected via WebSocket."""
+    global processed_token_mints
+    from main import app
+
+    if mint in processed_token_mints:
+        return
+    processed_token_mints.add(mint)
+
+    with app.app_context():
+        try:
+            from sniper_stream import stream_state
+            stream_state.mark_processed(mint)
+        except ImportError:
+            pass
+
+        configs = AutoSnipeConfig.query.filter_by(active=True).all()
+        print(f"[WS Detector] Attempting autosnipe for new token: {mint}")
+        for config in configs:
+            autosnipe_buy_new_token(mint, config)
+
 
 def run_detector():
     global last_checked_slot, processed_token_mints
     last_checked_slot = detect_new_tokens_single_pass(last_checked_slot, processed_token_mints)
 
-# Set up the scheduler
-scheduler = BackgroundScheduler()
-scheduler.add_job(run_detector, 'interval', seconds=5)  # Run every 10 seconds
-scheduler.start()
 
-# Ensure the scheduler shuts down gracefully on exit
-atexit.register(lambda: scheduler.shutdown())
+def _start_http_fallback_scheduler():
+    global _http_scheduler
+    if _http_scheduler and _http_scheduler.running:
+        return
+    _http_scheduler = BackgroundScheduler(daemon=True)
+    _http_scheduler.add_job(run_detector, "interval", seconds=5)
+    _http_scheduler.start()
+    atexit.register(lambda: _http_scheduler.shutdown(wait=False))
+    print("[HTTP Fallback] Detector scheduler running (every 5s).")
 
-print("Detector is running in the background...")
+
+def start_sniper_ingestion():
+    """
+    Start WebSocket ingestion (Phase 1) or HTTP polling fallback.
+    Call once from main.py (WERKZEUG child process only) to avoid duplicate schedulers.
+    """
+    global _ingestion_started
+    if _ingestion_started:
+        return
+    _ingestion_started = True
+
+    if SNIPER_USE_WEBSOCKET:
+        try:
+            from sniper_stream import start_sniper_stream, wait_for_connection
+
+            def _on_ws_connected():
+                stop_http_fallback_scheduler()
+
+            if start_sniper_stream(_handle_ws_new_token, on_connected=_on_ws_connected):
+                if wait_for_connection(timeout_sec=30):
+                    print(
+                        "[WS] Sniper WebSocket connected and listening for Pump.fun events."
+                    )
+                    stop_http_fallback_scheduler()
+                else:
+                    from settings import get_solana_ws_urls
+                    print(
+                        "[WS] Connecting... endpoints: "
+                        + ", ".join(get_solana_ws_urls())
+                    )
+                return
+        except Exception as exc:
+            print(f"[WS] Failed to start WebSocket sniper: {exc}")
+
+    if SNIPER_HTTP_FALLBACK:
+        print("[Sniper] WebSocket disabled or failed — using HTTP polling fallback.")
+        _start_http_fallback_scheduler()
+    else:
+        print("[Sniper] No ingestion started. Enable SNIPER_USE_WEBSOCKET or SNIPER_HTTP_FALLBACK.")

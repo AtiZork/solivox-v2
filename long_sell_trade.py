@@ -83,7 +83,9 @@ def long_auto_sell_schedular(app):
 
                         # Fetch price data
                         current_price_ = get_token_symbol_and_price(token_address)
-                        current_price = current_price_['usdPrice']
+                        if not current_price_ or not current_price_.get("usdPrice"):
+                            continue
+                        current_price = current_price_["usdPrice"]
                         if not current_price:
                             continue
 
@@ -145,13 +147,14 @@ def long_auto_sell_schedular(app):
                             if quote_response.status_code != 200:
                                 try:
                                     print(f"Error fetching quote: {quote_response.json()}")
-                                except JSONDecodeError as e:
-                                    print(f"Error fetching quote: {quote_response.json()}")
-                                finally:
-                                    continue
-                                    # exit()
+                                except JSONDecodeError:
+                                    print(f"Error fetching quote: {quote_response.text}")
+                                continue
 
                             quote_data = quote_response.json()
+                            if quote_data.get("error"):
+                                print(f"Error fetching quote: {quote_data}")
+                                continue
 
                             # Fetch the swap transaction for the quote
                             swap_request = {
@@ -168,11 +171,9 @@ def long_auto_sell_schedular(app):
                             if swap_response.status_code != 200:
                                 try:
                                     print(f"Error performing swap: {swap_response.json()}")
-                                except JSONDecodeError as e:
-                                    print(f"Error performing swap: {swap_response.json()}")
-                                finally:
-                                    continue
-                                    # exit()
+                                except JSONDecodeError:
+                                    print(f"Error performing swap: {swap_response.text}")
+                                continue
 
                             swap_data = swap_response.json()
 
@@ -363,13 +364,14 @@ def long_auto_sell_schedular(app):
                                     if quote_response.status_code != 200:
                                         try:
                                             print(f"Error fetching quote: {quote_response.json()}")
-                                        except JSONDecodeError as e:
-                                            print(f"Error fetching quote: {quote_response.json()}")
-                                        finally:
-                                            continue
-                                            # exit()
+                                        except JSONDecodeError:
+                                            print(f"Error fetching quote: {quote_response.text}")
+                                        continue
 
                                     quote_data = quote_response.json()
+                                    if quote_data.get("error"):
+                                        print(f"Error fetching quote: {quote_data}")
+                                        continue
 
                                     print("Quote response:", quote_data)
 
@@ -388,11 +390,9 @@ def long_auto_sell_schedular(app):
                                     if swap_response.status_code != 200:
                                         try:
                                             print(f"Error performing swap: {swap_response.json()}")
-                                        except JSONDecodeError as e:
-                                            print(f"Error performing swap: {swap_response.json()}")
-                                        finally:
-                                            continue
-                                            # exit()
+                                        except JSONDecodeError:
+                                            print(f"Error performing swap: {swap_response.text}")
+                                        continue
 
                                     swap_data = swap_response.json()
 
