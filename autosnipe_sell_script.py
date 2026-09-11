@@ -11,7 +11,8 @@ from flask import jsonify, Blueprint
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client
-from utils import get_token_symbol_and_price, get_token_metadata
+from shyft_pricing import get_token_price
+from utils import get_token_metadata
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -69,8 +70,14 @@ def auto_snipe_auto_sell_schedular(app):
                 trades = Trade.query.filter_by(executed=False, auto_snipe=True).order_by(Trade.id.desc()).all()
                 for trade_data in trades:
                     # Fetch the price of the token associated with the trade
-                    current_price_ = get_token_symbol_and_price(trade_data.token_address)
-                    current_price = current_price_['usdPrice']
+                    try:
+                        current_price_ = get_token_price(trade_data.token_address)
+                        current_price = current_price_['usdPrice']
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch price for trade {trade_data.id}: {e}")
+                        continue
+                    if not current_price:
+                        continue
                     amount = trade_data.purchased_token_amount
                     initial_price = trade_data.initial_price
                     if initial_price <= 0:

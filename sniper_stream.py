@@ -181,9 +181,9 @@ def _get_sol_usd_price() -> float:
     if _sol_usd_price > 0 and (now - _sol_price_updated_at) < 60:
         return _sol_usd_price
     try:
-        from utils import get_token_symbol_and_price
+        from shyft_pricing import get_token_price
 
-        data = get_token_symbol_and_price(WSOL_MINT)
+        data = get_token_price(WSOL_MINT)
         if data and data.get("usdPrice"):
             _sol_usd_price = float(data["usdPrice"])
             _sol_price_updated_at = now

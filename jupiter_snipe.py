@@ -11,7 +11,7 @@ from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from solders.pubkey import Pubkey
 from settings import solana_client
-from utils import get_token_symbol_and_price, get_token_metadata, extract_token_info_from_moralis
+from utils import get_token_metadata, extract_token_info_from_moralis
 # from solana.publickey import PublicKey
 from solders.pubkey import Pubkey
 

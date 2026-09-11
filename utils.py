@@ -96,136 +96,22 @@ def pump_price(mint):
     return resp
 
 def get_token_symbol_and_price(mint_address: str):
+    """Deprecated wrapper — prefer shyft_pricing.get_token_price."""
     try:
-        API_KEY = "jup_a1d0b05ce8142c073eb08772a4e6b3cb26449466bc702d5a949b3ebd1f8a32f6"
-
-        headers = {
-            "x-api-key": API_KEY
-        }
-
-        SOL_MINT = "So11111111111111111111111111111111111111112"
-
-        # Token Metadata
-        metadata_url = f"https://api.jup.ag/tokens/v2/search?query={mint_address}"
-        meta_response = requests.get(metadata_url, headers=headers)
-
-        token_name = "Unknown"
-        token_symbol = "Unknown"
-
-        if meta_response.status_code == 200:
-            meta_data = meta_response.json()
-
-            if meta_data and len(meta_data) > 0:
-                token_name = meta_data[0].get("name", "Unknown")
-                token_symbol = meta_data[0].get("symbol", "Unknown")
-
-        # Token Price + SOL Price
-        price_url = f"https://api.jup.ag/price/v3?ids={mint_address},{SOL_MINT}"
-        price_response = requests.get(price_url, headers=headers)
-
-        if price_response.status_code == 200:
-            price_data = price_response.json()
-
-            if mint_address in price_data:
-
-                token_data = price_data[mint_address]
-
-                # Token USD Price
-                token_usd_price = round(
-                    float(token_data.get("usdPrice", 0)),
-                    6
-                )
-
-                # SOL USD Price
-                sol_usd_price = None
-
-                if SOL_MINT in price_data:
-                    sol_usd_price = round(
-                        float(price_data[SOL_MINT].get("usdPrice", 0)),
-                        6
-                    )
-
-                result = {
-                    **token_data,
-                    "usdPrice": token_usd_price,
-                    "name": token_name,
-                    "symbol": token_symbol,
-                    "sol_price_usd": sol_usd_price
-                }
-
-                print(result)
-                return result
-
-        return None
-
+        from shyft_pricing import get_token_price
+        return get_token_price(mint_address)
     except Exception as e:
         print(f"Error: {e}")
         return None
 
+
 def get_token_symbol_and_prices(mint_address: str):
+    """Deprecated wrapper — prefer shyft_pricing.get_token_price."""
     try:
-        # Your Jupiter API Key
-        API_KEY = "jup_a1d0b05ce8142c073eb08772a4e6b3cb26449466bc702d5a949b3ebd1f8a32f6"
-
-        headers = {
-            "x-api-key": API_KEY
-        }
-        # Step 1: Fetch Token Metadata (Name & Symbol)
-        metadata_url = f"https://api.jup.ag/tokens/v2/search?query={mint_address}"
-        meta_response = requests.get(metadata_url, headers=headers)
-
-        token_name = "Unknown"
-        token_symbol = "Unknown"
-
-        if meta_response.status_code == 200:
-            meta_data = meta_response.json()
-            # Tokens V2 search return an array/list of matching tokens
-            if meta_data and len(meta_data) > 0:
-                token_name = meta_data[0].get("name", "Unknown")
-                token_symbol = meta_data[0].get("symbol", "Unknown")
-
-        # Step 2: Fetch Token Price
-        price_url = f"https://api.jup.ag/price/v3?ids={mint_address}"
-        price_response = requests.get(price_url, headers=headers)
-
-        if price_response.status_code == 200:
-            price_data_ = price_response.json()
-
-            # Extract matching data mapping cleanly
-            if price_data_ and mint_address in price_data_:
-                data = price_data_[mint_address]
-
-                # Format price to 4 digits after dot
-                if "usdPrice" in data and data["usdPrice"] is not None:
-                    data["usdPrice"] = round(float(data["usdPrice"]), 6)
-
-                # Inject metadata into the final response
-                data["name"] = token_name
-                data["symbol"] = token_symbol
-
-                print(data)
-                return data
-            else:
-                print("Price data not found for this mint address.")
-                return None
-        # params = {
-        #     "network": "mainnet",
-        #     "address": token_mint
-        # }
-        # if token_mint.endswith("pump"):
-        #     result = pump_price(token_mint)
-        #     if result is None:
-        #         result = sol_api.token.get_token_price(
-        #             api_key=moraliz_api_key,
-        #             params=params,
-        #         )
-        # else:
-        #     result = sol_api.token.get_token_price(
-        #         api_key=moraliz_api_key,
-        #         params=params,
-        #     )
-        # return result
+        from shyft_pricing import get_token_price
+        return get_token_price(mint_address)
     except Exception as e:
+        print(f"Error: {e}")
         return None
 
 
@@ -246,10 +132,11 @@ def extract_token_info_from_moralis(moralis_result, trade):
     try:
 
         name = moralis_result.get("name")
-        address = moralis_result.get("tokenAddress")
-        price = float(moralis_result.get("usdPrice", 0))
-        sol_price_data_ = get_token_symbol_and_price("So11111111111111111111111111111111111111112")  # WSOL mint
-        sol_price_data = float(sol_price_data_.get("usdPrice", 0))
+        address = moralis_result.get("tokenAddress") or moralis_result.get("mint") or moralis_result.get("token_address")
+        price = float(moralis_result.get("usdPrice") or moralis_result.get("usd_price") or 0)
+        from shyft_pricing import get_token_price
+        sol_price_data_ = get_token_price("So11111111111111111111111111111111111111112")  # WSOL mint
+        sol_price_data = float(sol_price_data_.get("usdPrice", 0) or 0)
 
         # Custom logic for fields not in API
         profit, payout_usd, payout_sol = calculate_profit_and_payout(trade, price, sol_price_data)
@@ -300,7 +187,8 @@ def get_estimated_market_cap(token_address: str) -> float | None:
 
     try:
         # Fetch token price from Moralis (or your existing method)
-        price_info = get_token_symbol_and_price(token_address)
+        from shyft_pricing import get_token_price
+        price_info = get_token_price(token_address)
         usd_price = price_info.get("usdPrice")
         if not usd_price:
             print("[MarketCap] Price not available.")

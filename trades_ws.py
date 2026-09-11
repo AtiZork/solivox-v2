@@ -5,7 +5,8 @@ from threading import Thread
 from flask import request
 from solders.pubkey import Pubkey
 from settings import solana_client
-from utils import get_token_symbol_and_price, calculate_profit_and_payout, get_estimated_market_cap
+from shyft_pricing import get_token_price
+from utils import calculate_profit_and_payout, get_estimated_market_cap
 from flask_socketio import emit, disconnect
 from flask import copy_current_request_context
 
@@ -24,7 +25,7 @@ from flask import copy_current_request_context
 #             trade_data = []
 #
 #             for trade in trades:
-#                 price_info = get_token_symbol_and_price(trade.token_address)
+#                 price_info = get_token_price(trade.token_address)
 #                 if price_info:
 #                     current_price = price_info.get("usdPrice", 0)
 #                 else:
@@ -41,7 +42,7 @@ from flask import copy_current_request_context
 #                 except Exception as e:
 #                     print(f"[MarketCap] Solana RPC fallback failed: {e}")
 #                     market_cap = 0
-#                 sol_price_data_ = get_token_symbol_and_price("So11111111111111111111111111111111111111112")  # WSOL
+#                 sol_price_data_ = get_token_price("So11111111111111111111111111111111111111112")  # WSOL
 #                 if sol_price_data_:
 #                     sol_price_data = float(sol_price_data_.get("usdPrice", 0))
 #
@@ -104,10 +105,10 @@ def handle_trade_subscription():
         trade_data = []
 
         for trade in trades:
-            price_info = get_token_symbol_and_price(trade.token_address)
-            if price_info:
-                current_price = price_info.get("usdPrice", 0)
-            else:
+            try:
+                price_info = get_token_price(trade.token_address)
+                current_price = price_info.get("usdPrice", 0) or 0
+            except Exception:
                 current_price = 0
             # fetch market cap
             try:
@@ -121,12 +122,11 @@ def handle_trade_subscription():
             except Exception as e:
                 print(f"[MarketCap] Solana RPC fallback failed: {e}")
                 market_cap = 0
-            sol_price_data_ = get_token_symbol_and_price("So11111111111111111111111111111111111111112")  # WSOL
-            if sol_price_data_:
-                sol_price_data = float(sol_price_data_.get("usdPrice", 0))
-
+            try:
+                sol_price_data_ = get_token_price("So11111111111111111111111111111111111111112")  # WSOL
+                sol_price_data = float(sol_price_data_.get("usdPrice", 0) or 0)
                 profit, payout_usd, payout_sol = calculate_profit_and_payout(trade, current_price, sol_price_data)
-            else:
+            except Exception:
                 profit = 0
                 payout_usd = 0
                 payout_sol = 0
@@ -198,9 +198,9 @@ def handle_trade_subscription():
 #                 trade_data = []
 #
 #                 for trade in trades:
-#                     price_info = get_token_symbol_and_price(trade.token_address)
+#                     price_info = get_token_price(trade.token_address)
 #                     current_price = price_info.get("usdPrice", 0)
-#                     sol_price_data_ = get_token_symbol_and_price("So11111111111111111111111111111111111111112")  # WSOL mint
+#                     sol_price_data_ = get_token_price("So11111111111111111111111111111111111111112")  # WSOL mint
 #                     sol_price_data = float(sol_price_data_.get("usdPrice", 0))
 #                     profit, payout_usd, payout_sol = calculate_profit_and_payout(trade, current_price, sol_price_data)
 #
@@ -251,11 +251,18 @@ def push_trades():
             trade_data = []
 
             for trade in trades:
-                price_info = get_token_symbol_and_price(trade.token_address)
-                current_price = price_info.get("usdPrice", 0)
-                sol_price_data_ = get_token_symbol_and_price("So11111111111111111111111111111111111111112")  # WSOL mint
-                sol_price_data = float(sol_price_data_.get("usdPrice", 0))
-                profit, payout_usd, payout_sol = calculate_profit_and_payout(trade, current_price, sol_price_data)
+                try:
+                    price_info = get_token_price(trade.token_address)
+                    current_price = price_info.get("usdPrice", 0) or 0
+                    sol_price_data_ = get_token_price("So11111111111111111111111111111111111111112")  # WSOL mint
+                    sol_price_data = float(sol_price_data_.get("usdPrice", 0) or 0)
+                    profit, payout_usd, payout_sol = calculate_profit_and_payout(trade, current_price, sol_price_data)
+                except Exception as e:
+                    print(f"[trades_ws] price fetch failed for {trade.token_address}: {e}")
+                    current_price = 0
+                    profit = 0
+                    payout_usd = 0
+                    payout_sol = 0
                 trade_data.append({
                     "id": trade.id,
                     "token": trade.token_name,

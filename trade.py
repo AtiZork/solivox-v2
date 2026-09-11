@@ -13,8 +13,10 @@ from solana.rpc.core import RPCException
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client
-from utils import get_token_symbol_and_price, get_token_metadata, extract_token_info_from_moralis
+from utils import get_token_metadata, extract_token_info_from_moralis
 from solders.pubkey import Pubkey
+from shyft_pricing import get_token_price
+
 
 solana_bp = Blueprint('solana_bp', __name__)
 
@@ -36,7 +38,7 @@ def buy_token_trade():
         to_pubkey = data.get("to_pubkey")
         token_address = data.get("token_address")
         amount = data.get("amount")
-        current_token_price_ = get_token_symbol_and_price(token_address)
+        current_token_price_ = get_token_price(token_address)
         current_token_price = current_token_price_["usdPrice"]
         token_name = current_token_price_["name"]
         token_symbol = current_token_price_["symbol"]
@@ -391,8 +393,9 @@ def token_stats(trade_id):
     trade = Trade.query.get_or_404(trade_id)
     token_address = trade.token_address
 
-    moralis_data = get_token_symbol_and_price(token_address)  # Your current function
-    if not moralis_data:
+    try:
+        moralis_data = get_token_price(token_address)  # Shyft live price + details
+    except Exception:
         return jsonify({"error": "Failed to fetch token data"}), 400
 
     result = extract_token_info_from_moralis(moralis_data, trade)
@@ -412,7 +415,7 @@ def buy_token(trade_id):
         to_pubkey = trade.to_pubkey if trade.to_pubkey else ""
         token_address = trade.token_address if trade.token_address else ""
         amount = data.get("amount")
-        current_token_price_ = get_token_symbol_and_price(token_address)
+        current_token_price_ = get_token_price(token_address)
         current_token_price = current_token_price_["usdPrice"]
         wallet = Wallet.query.filter_by(public_key=to_pubkey).first()
         if not wallet:

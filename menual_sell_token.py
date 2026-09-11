@@ -10,7 +10,8 @@ from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client
 from dotenv import load_dotenv
-from utils import get_token_symbol_and_price, get_token_metadata
+from shyft_pricing import get_token_price
+from utils import get_token_metadata
 from solders.pubkey import Pubkey
 
 load_dotenv()
@@ -91,12 +92,12 @@ def sell_token(trade_id):
         sol_price_usd = None
 
         # Fetch token and SOL prices in USD
-        current_token_price_ = get_token_symbol_and_price(token_address)
+        current_token_price_ = get_token_price(token_address)
         if current_token_price_['usdPrice'] is not None and current_token_price_["sol_price_usd"]:
             token_price_usd = current_token_price_["usdPrice"]  # price in used
             sol_price_usd = current_token_price_["sol_price_usd"]
             if not sol_price_usd:
-                sol_price_usd = get_token_symbol_and_price("So11111111111111111111111111111111111111112")["usdPrice"]
+                sol_price_usd = get_token_price("So11111111111111111111111111111111111111112")["usdPrice"]
 
         if not token_price_usd or not sol_price_usd: # price in sol
             return jsonify({"status": "failed", "message": "Failed to fetch token or SOL price"}), 400
@@ -118,7 +119,7 @@ def sell_token(trade_id):
             return jsonify({"status": "failed", "message": "Sell token amount must be greater then 0"}), 400
         if amount > total_tokens:
             return jsonify({"status": "failed", "message": "Sell token amount greater then available tokens"}), 400
-        current_token_price_ = get_token_symbol_and_price(token_address)
+        current_token_price_ = get_token_price(token_address)
         current_token_price = current_token_price_["usdPrice"]
         wallet = Wallet.query.filter_by(public_key=to_pubkey).first()
         private_key_path = wallet.private_key

@@ -4,7 +4,8 @@ from dotenv import load_dotenv
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client, Solcan_api_key, moraliz_api_key
-from utils import get_token_symbol_and_price, get_token_metadata
+from shyft_pricing import get_token_price
+from utils import get_token_metadata
 from apscheduler.schedulers.background import BackgroundScheduler
 import base64
 import os
@@ -90,7 +91,7 @@ def auto_buy_token(app):
 
                 for token in new_tokens:
                     token_address = token['address']
-                    current_price = get_token_symbol_and_price(token_address)['usdPrice']
+                    current_price = get_token_price(token_address)['usdPrice']
 
                     # Fetch transactions for the token
                     transactions = get_token_transactions(token_address, config["min_transactions"], config["min_transaction_value"])
@@ -332,7 +333,7 @@ def get_token_transactions(token_address, min_txns, min_value_usd):
                 if token_balance['mint'] == token_address:
                     # Convert the value from lamports to SOL and then fetch USD price
                     lamports = token_balance['uiAmount']
-                    value_in_usd = lamports * get_token_symbol_and_price(token_address)['usdPrice']
+                    value_in_usd = lamports * get_token_price(token_address)['usdPrice']
 
                     if value_in_usd >= min_value_usd:
                         transaction_details.append({'value': value_in_usd, 'signature': tx['signature']})

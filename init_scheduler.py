@@ -11,7 +11,7 @@ import logging
 
 from models import db, Trade, TokenPrice
 from settings import PRICE_HTTP_FALLBACK, PRICE_USE_WEBSOCKET
-from utils import get_token_symbol_and_price
+from shyft_pricing import get_token_price
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def create_scheduler(app):
         return
 
     # WS primary → slow HTTP backup; WS off → faster HTTP primary
-    http_interval_seconds = 120 if ws_started else 30
+    http_interval_seconds = 5 if ws_started else 30
 
     scheduler = BackgroundScheduler(daemon=True)
     _http_scheduler = scheduler
@@ -67,7 +67,7 @@ def create_scheduler(app):
                     if not address:
                         continue
                     try:
-                        price_data = get_token_symbol_and_price(address)
+                        price_data = get_token_price(address)
                     except Exception as fetch_exc:
                         print(f"[×] Price fetch failed for {address[:8]}...: {fetch_exc}")
                         continue

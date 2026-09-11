@@ -71,3 +71,28 @@ Solcan_api_key = os.getenv(
     "SOLSCAN_API_KEY",
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NDk2Mjg2OTE3MTIsImVtYWlsIjoibXVzYWRkYXFhYmJhczk2QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc0OTYyODY5MX0.kKzTK1hz-c5NBw80Mb4P7hiIHbH81fUQwSVBS10L0Wo",
 )
+
+# ---------------------------------------------------------------------------
+# Shyft (RPC + WebSocket + REST). Prefer env; defaults match prior local config.
+# Override via SHYFT_API_KEY / SHYFET_API_KEY (and optional URL overrides).
+# ---------------------------------------------------------------------------
+SHYFT_API_KEY = os.getenv("SHYFT_API_KEY") or os.getenv(
+    "SHYFET_API_KEY",
+    "bOmjFPxty2EMMr6j",
+)
+SHYFT_RPC_URL = os.getenv(
+    "SHYFT_RPC_URL",
+    f"https://rpc.shyft.to?api_key={SHYFT_API_KEY}",
+)
+SHYFT_WS_URL = os.getenv(
+    "SHYFT_WS_URL",
+    f"wss://rpc.shyft.to?api_key={SHYFT_API_KEY}",
+)
+SHYFT_API_BASE = os.getenv("SHYFT_API_BASE", "https://api.shyft.to")
+SHYFT_NETWORK = os.getenv("SHYFT_NETWORK", "mainnet-beta")
+
+# Backward-compatible aliases (existing typo spellings)
+shyfet_api_key = SHYFT_API_KEY
+WEBSOCKET_KEY_SHYFET = SHYFT_WS_URL
+SHYFET_RPC = SHYFT_RPC_URL
+SHYFET_WS_URL = SHYFT_WS_URL

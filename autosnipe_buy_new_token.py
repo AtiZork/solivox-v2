@@ -11,7 +11,7 @@ from solana.rpc.core import RPCException
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client, SNIPER_USE_WEBSOCKET, SNIPER_HTTP_FALLBACK
-from utils import get_token_symbol_and_price
+from shyft_pricing import get_token_price
 from solders.pubkey import Pubkey
 
 log_messages = []
@@ -66,7 +66,7 @@ BOUGHT_TOKENS = set()
 
 def get_token_price_usd(token_address):
     try:
-        current_token_price_ = get_token_symbol_and_price(token_address)
+        current_token_price_ = get_token_price(token_address)
         current_token_price = current_token_price_["usdPrice"]
         return current_token_price
     except Exception as e:
@@ -220,8 +220,8 @@ def get_token_specific_transactions(token_address, min_required, min_usd_value):
 
 def convert_sol_to_usd(sol_amount):
     token_address = 'So11111111111111111111111111111111111111112'
-    current_sol_price = get_token_symbol_and_price(token_address)  # Replace with API fetch if needed
-    return sol_amount * current_sol_price
+    current_sol_price = get_token_price(token_address)  # Shyft live price
+    return sol_amount * float(current_sol_price.get("usdPrice") or 0)
 
 
 def price_usd_func(txn: dict) -> float:
@@ -338,7 +338,7 @@ def _buy_token_internal(token_address, config):
         to_pubkey = wallet.public_key
 
         amount = buy_amount_sol # Amount in SOL to spend
-        current_token_price_data = get_token_symbol_and_price(token_address)
+        current_token_price_data = get_token_price(token_address)
         current_token_price = current_token_price_data["usdPrice"]
         token_name = current_token_price_data["name"]
         token_symbol = current_token_price_data["symbol"]

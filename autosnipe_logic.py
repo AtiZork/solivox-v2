@@ -18,7 +18,7 @@ from solana.rpc.commitment import Processed, Confirmed
 # Local imports from your project
 # Ensure these paths are correct relative to autosnipe_logic.py
 from settings import SOLANA_WS_URL, PUMP_FUN_PROGRAM_ID_STR, solana_client
-from utils import get_token_symbol_and_price # Assuming utils.py has this
+from shyft_pricing import get_token_price
 # You'll need to pass the `db` object for models to work within a new thread
 # or import it directly if `models.py` handles `db` initialization in a way that allows it.
 # For now, we'll import `db` and models directly, assuming `db` is already initialized in `app.py`.
@@ -312,8 +312,11 @@ def get_token_transactions(token_address: str, min_txns: int, min_value_usd: flo
                 post_balance = tx_details.meta.post_balances[account_index]
                 sol_change = (post_balance - pre_balance) / (10**9) # Convert lamports to SOL
                 if abs(sol_change) > 0.000000001: # Check for significant SOL change
-                    sol_price_info = get_token_symbol_and_price("So11111111111111111111111111111111111111112") # Fetch SOL price
-                    tx_value_usd += abs(sol_change) * sol_price_info['usdPrice']
+                    try:
+                        sol_price_info = get_token_price("So11111111111111111111111111111111111111112") # Fetch SOL price
+                        tx_value_usd += abs(sol_change) * float(sol_price_info['usdPrice'] or 0)
+                    except Exception:
+                        continue
 
             # Option B: Look for token balance changes (more direct for token trades)
             # This is complex for new tokens, as their USD price is volatile/unknown
@@ -324,7 +327,7 @@ def get_token_transactions(token_address: str, min_txns: int, min_value_usd: flo
                         # For a new token, its USD value is primarily driven by the SOL side of the LP.
                         # You'd ideally look at the instruction's amount.
                         # For the filter, let's assume the SOL value captures the essence.
-                        pass # No direct USD value calculation from token_balance changes here to avoid circular logic with get_token_symbol_and_price on new tokens.
+                        pass # No direct USD value calculation from token_balance changes here to avoid circular logic with get_token_price on new tokens.
 
             if tx_value_usd >= min_value_usd:
                 valid_transactions.append({'value': tx_value_usd, 'signature': signature})

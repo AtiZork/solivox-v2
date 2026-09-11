@@ -13,7 +13,8 @@ from solana.rpc.core import RPCException
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client
-from utils import get_token_symbol_and_price, get_token_metadata
+from shyft_pricing import get_token_price
+from utils import get_token_metadata
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -82,7 +83,10 @@ def long_auto_sell_schedular(app):
                         token_address = trade_data.token_address
 
                         # Fetch price data
-                        current_price_ = get_token_symbol_and_price(token_address)
+                        try:
+                            current_price_ = get_token_price(token_address)
+                        except Exception:
+                            continue
                         if not current_price_ or not current_price_.get("usdPrice"):
                             continue
                         current_price = current_price_["usdPrice"]
@@ -93,7 +97,7 @@ def long_auto_sell_schedular(app):
                         amount = trade_data.purchased_token_amount
                         amount_to_trade = 0
                         if trade_data.buy_token_if_price is True and trade_data.trade_type == "BUY":
-                            # current_price_usd = get_token_symbol_and_price(trade_data.token_address)
+                            # current_price_usd = get_token_price(trade_data.token_address)
                             current_price_usd = current_price
                             buy_condition_met = False
                             # 🔹 2. Check if price meets buy_if_price_up or buy_if_price_down
