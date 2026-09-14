@@ -465,9 +465,12 @@ def _buy_token_internal(token_address, config):
             trade_kind="AUTOSNIPE", # Explicitly marking it as an AUTOSNIPE trade
             autosnipe_sell_slippage=config.slippage if config.slippage else 0.30, # Use config slippage for sell if no dedicated field
             drop_cutoff=config.drop_cutoff if config.drop_cutoff else 30,
+            drop_cutoff_enabled=bool(getattr(config, "drop_cutoff_enabled", True)),
             drop_until_profit=config.drop_until_profit if config.drop_until_profit else 99,
             drop_after_100=config.drop_after_100 if config.drop_after_100 else 50,
+            drop_after_100_enabled=bool(getattr(config, "drop_after_100_enabled", True)),
             drop_after_400=config.drop_after_400 if config.drop_after_400 else 30,
+            drop_after_400_enabled=bool(getattr(config, "drop_after_400_enabled", True)),
             sell_at_200=config.sell_at_200 if config.sell_at_200 else 10,
             sell_at_400=config.sell_at_400 if config.sell_at_400 else 10,
             sell_at_1000=config.sell_at_1000 if config.sell_at_1000 else 10,

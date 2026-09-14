@@ -168,6 +168,12 @@ function openModalWithData(sniper) {
   if (dropUntilField) dropUntilField.value = sniper.drop_until_profit ?? 99;
   if (dropAfter100Field) dropAfter100Field.value = sniper.drop_after_100 ?? 50;
   if (dropAfter400Field) dropAfter400Field.value = sniper.drop_after_400 ?? 30;
+  const dropCutoffEnabled = document.getElementById('modal_drop_cutoff_enabled');
+  const dropAfter100Enabled = document.getElementById('modal_drop_after_100_enabled');
+  const dropAfter400Enabled = document.getElementById('modal_drop_after_400_enabled');
+  if (dropCutoffEnabled) dropCutoffEnabled.checked = sniper.drop_cutoff_enabled !== false;
+  if (dropAfter100Enabled) dropAfter100Enabled.checked = sniper.drop_after_100_enabled !== false;
+  if (dropAfter400Enabled) dropAfter400Enabled.checked = sniper.drop_after_400_enabled !== false;
   if (sell200) sell200.value = sniper.sell_at_200 ?? 10;
   if (sell400) sell400.value = sniper.sell_at_400 ?? 10;
   if (sell1000) sell1000.value = sniper.sell_at_1000 ?? 10;
@@ -225,6 +231,12 @@ function clearModal() {
   if (dropUntilField) dropUntilField.value = 99;
   if (dropAfter100Field) dropAfter100Field.value = 50;
   if (dropAfter400Field) dropAfter400Field.value = 30;
+  const dropCutoffEnabled = document.getElementById('modal_drop_cutoff_enabled');
+  const dropAfter100Enabled = document.getElementById('modal_drop_after_100_enabled');
+  const dropAfter400Enabled = document.getElementById('modal_drop_after_400_enabled');
+  if (dropCutoffEnabled) dropCutoffEnabled.checked = true;
+  if (dropAfter100Enabled) dropAfter100Enabled.checked = true;
+  if (dropAfter400Enabled) dropAfter400Enabled.checked = true;
   if (sell200) sell200.value = 10;
   if (sell400) sell400.value = 10;
   if (sell1000) sell1000.value = 10;
@@ -249,9 +261,12 @@ async function onModalSave(e) {
     slippage: parseFloat(document.getElementById('modal_slippage')?.value) || 100,
     priority_fee: parseFloat(document.getElementById('modal_priority_fee')?.value) || 0.01,
     drop_cutoff: parseFloat(document.getElementById('modal_drop_cutoff')?.value) || 30,
+    drop_cutoff_enabled: !!document.getElementById('modal_drop_cutoff_enabled')?.checked,
     drop_until_profit: parseFloat(document.getElementById('modal_drop_until_profit')?.value) || 99,
     drop_after_100: parseFloat(document.getElementById('modal_drop_after_100')?.value) || 50,
+    drop_after_100_enabled: !!document.getElementById('modal_drop_after_100_enabled')?.checked,
     drop_after_400: parseFloat(document.getElementById('modal_drop_after_400')?.value) || 30,
+    drop_after_400_enabled: !!document.getElementById('modal_drop_after_400_enabled')?.checked,
     sell_at_200: parseFloat(document.getElementById('modal_sell_at_200')?.value) || 10,
     sell_at_400: parseFloat(document.getElementById('modal_sell_at_400')?.value) || 10,
     sell_at_1000: parseFloat(document.getElementById('modal_sell_at_1000')?.value) || 10,

@@ -297,9 +297,12 @@ def get_trades():
             # Sniper Auto-sell conditions (saved on Trade at buy time)
             base_trade_data.update({
                 "drop_cutoff": trade.drop_cutoff,
+                "drop_cutoff_enabled": bool(getattr(trade, "drop_cutoff_enabled", True)),
                 "drop_until_profit": trade.drop_until_profit,
                 "drop_after_100": trade.drop_after_100,
+                "drop_after_100_enabled": bool(getattr(trade, "drop_after_100_enabled", True)),
                 "drop_after_400": trade.drop_after_400,
+                "drop_after_400_enabled": bool(getattr(trade, "drop_after_400_enabled", True)),
                 "sell_at_200": trade.sell_at_200,
                 "sell_at_400": trade.sell_at_400,
                 "sell_at_1000": trade.sell_at_1000,
@@ -354,9 +357,12 @@ def update_trade(trade_id):
             "buy_if_price_down": "buy_if_price_down",
             # Sniper sell configuration
             "drop_cutoff": "drop_cutoff",
+            "drop_cutoff_enabled": "drop_cutoff_enabled",
             "drop_until_profit": "drop_until_profit",
             "drop_after_100": "drop_after_100",
+            "drop_after_100_enabled": "drop_after_100_enabled",
             "drop_after_400": "drop_after_400",
+            "drop_after_400_enabled": "drop_after_400_enabled",
             "sell_at_200": "sell_at_200",
             "sell_at_400": "sell_at_400",
             "sell_at_1000": "sell_at_1000",
@@ -377,6 +383,11 @@ def update_trade(trade_id):
                 value = data[payload_field]
                 if value == "":  # Optional: treat empty string as None
                     value = None
+                if db_field.endswith("_enabled") and value is not None:
+                    if isinstance(value, str):
+                        value = value.lower() in ("true", "1", "yes", "on")
+                    else:
+                        value = bool(value)
                 setattr(trade, db_field, value)
 
         db.session.commit()

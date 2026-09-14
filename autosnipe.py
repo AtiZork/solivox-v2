@@ -68,6 +68,22 @@ def _validate_config_payload(data):
     return errors
 
 
+def _parse_bool(value, default=True):
+    """Parse JSON/form boolean values, matching AutoSnipeConfig.active handling."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+_SNIPER_ENABLE_FIELDS = (
+    "drop_cutoff_enabled",
+    "drop_after_100_enabled",
+    "drop_after_400_enabled",
+)
+
+
 # Backwards-compatible single-config save (keeps existing front-end POST /api/autosnipe)
 @autosnipe_bp.route('/api/autosnipe', methods=['POST'])
 @jwt_required()
@@ -92,10 +108,7 @@ def autosnipe():
             config = AutoSnipeConfig(user_id=user_id)
 
         active = data.get("active", True)  # default True if missing
-        if isinstance(active, str):
-            active = active.lower() == "true"
-
-        config.active = bool(active)
+        config.active = _parse_bool(active, True)
         # Direct assign assuming correct types from frontend (coerce where reasonable)
         if 'buy_txns_over_80_usd' in data:
             config.buy_txns_over_80_usd = int(data.get('buy_txns_over_80_usd'))
@@ -118,6 +131,9 @@ def autosnipe():
                     setattr(config, f, float(data.get(f)))
                 except Exception:
                     pass
+        for f in _SNIPER_ENABLE_FIELDS:
+            if f in data:
+                setattr(config, f, _parse_bool(data.get(f), True))
 
         # `name` field intentionally removed per request; do not assign
         config.user_id = int(user_id)
@@ -167,9 +183,12 @@ def list_autosnipers():
                         'slippage': row.get('slippage', 100),
                         'priority_fee': row.get('priority_fee', 0.01),
                         'drop_cutoff': row.get('drop_cutoff', 30),
+                        'drop_cutoff_enabled': bool(row.get('drop_cutoff_enabled')) if 'drop_cutoff_enabled' in row else True,
                         'drop_until_profit': row.get('drop_until_profit', 99),
                         'drop_after_100': row.get('drop_after_100', 50),
+                        'drop_after_100_enabled': bool(row.get('drop_after_100_enabled')) if 'drop_after_100_enabled' in row else True,
                         'drop_after_400': row.get('drop_after_400', 30),
+                        'drop_after_400_enabled': bool(row.get('drop_after_400_enabled')) if 'drop_after_400_enabled' in row else True,
                         'sell_at_200': row.get('sell_at_200', 10),
                         'sell_at_400': row.get('sell_at_400', 10),
                         'sell_at_1000': row.get('sell_at_1000', 10),
@@ -209,9 +228,12 @@ def get_autosnipe():
                 "slippage": config.slippage,
                 "priority_fee": config.priority_fee,
                 "drop_cutoff": config.drop_cutoff,
+                "drop_cutoff_enabled": bool(getattr(config, "drop_cutoff_enabled", True)),
                 "drop_until_profit": config.drop_until_profit,
                 "drop_after_100": config.drop_after_100,
+                "drop_after_100_enabled": bool(getattr(config, "drop_after_100_enabled", True)),
                 "drop_after_400": config.drop_after_400,
+                "drop_after_400_enabled": bool(getattr(config, "drop_after_400_enabled", True)),
                 "sell_at_200": config.sell_at_200,
                 "sell_at_400": config.sell_at_400,
                 "sell_at_1000": config.sell_at_1000,
@@ -246,9 +268,12 @@ def get_autosnipe():
                     'slippage': r.get('slippage', 100),
                     'priority_fee': r.get('priority_fee', 0.01),
                     'drop_cutoff': r.get('drop_cutoff', 30),
+                    'drop_cutoff_enabled': bool(r.get('drop_cutoff_enabled')) if 'drop_cutoff_enabled' in r else True,
                     'drop_until_profit': r.get('drop_until_profit', 99),
                     'drop_after_100': r.get('drop_after_100', 50),
+                    'drop_after_100_enabled': bool(r.get('drop_after_100_enabled')) if 'drop_after_100_enabled' in r else True,
                     'drop_after_400': r.get('drop_after_400', 30),
+                    'drop_after_400_enabled': bool(r.get('drop_after_400_enabled')) if 'drop_after_400_enabled' in r else True,
                     'sell_at_200': r.get('sell_at_200', 10),
                     'sell_at_400': r.get('sell_at_400', 10),
                     'sell_at_1000': r.get('sell_at_1000', 10),
@@ -289,7 +314,7 @@ def update_autosnipe(config_id):
             return jsonify({'error': 'Not found'}), 404
         # Update allowed fields
         if 'active' in data:
-            config.active = bool(data.get('active', config.active))
+            config.active = _parse_bool(data.get('active'), config.active)
         for f in ['buy_txns_over_80_usd','min_txns','launch_delay','buy_amount','slippage','priority_fee']:
             if f in data:
                 try:
@@ -303,6 +328,9 @@ def update_autosnipe(config_id):
                     setattr(config, f, float(data.get(f)))
                 except Exception:
                     pass
+        for f in _SNIPER_ENABLE_FIELDS:
+            if f in data:
+                setattr(config, f, _parse_bool(data.get(f), True))
         config.timestamp = datetime.utcnow()
         db.session.add(config)
         db.session.commit()

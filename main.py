@@ -38,6 +38,39 @@ db.init_app(app)
 with app.app_context():
     db.create_all()
 
+    def _ensure_sniper_enable_columns():
+        """Add sniper enable/disable columns on existing Postgres tables if missing."""
+        from sqlalchemy import inspect, text
+
+        specs = {
+            "auto_snipe_config": [
+                ("drop_cutoff_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("drop_after_100_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("drop_after_400_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+            ],
+            "trade": [
+                ("drop_cutoff_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("drop_after_100_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("drop_after_400_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+            ],
+        }
+        try:
+            insp = inspect(db.engine)
+            existing_tables = set(insp.get_table_names())
+            with db.engine.begin() as conn:
+                for table, columns in specs.items():
+                    if table not in existing_tables:
+                        continue
+                    have = {c["name"] for c in insp.get_columns(table)}
+                    for col_name, col_type in columns:
+                        if col_name in have:
+                            continue
+                        conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {col_name} {col_type}'))
+        except Exception as exc:
+            print(f"[DB] ensure sniper enable columns skipped: {exc}")
+
+    _ensure_sniper_enable_columns()
+
 
 def get_logs_from_db():
     return TradeLog.query.order_by(TradeLog.timestamp.desc()).all()

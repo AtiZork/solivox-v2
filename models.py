@@ -75,9 +75,12 @@ class AutoSnipeConfig(db.Model):
 
     # AutoSell settings with defaults
     drop_cutoff = db.Column(db.Float, default=30)
+    drop_cutoff_enabled = db.Column(db.Boolean, nullable=False, default=True)
     drop_until_profit = db.Column(db.Float, default=99)
     drop_after_100 = db.Column(db.Float, default=50)
+    drop_after_100_enabled = db.Column(db.Boolean, nullable=False, default=True)
     drop_after_400 = db.Column(db.Float, default=30)
+    drop_after_400_enabled = db.Column(db.Boolean, nullable=False, default=True)
 
     # Sell at target profit % fields with defaults
     sell_at_200 = db.Column(db.Float, default=10)
@@ -101,9 +104,12 @@ class AutoSnipeConfig(db.Model):
             "slippage": self.slippage,
             "priority_fee": self.priority_fee,
             "drop_cutoff": self.drop_cutoff,
+            "drop_cutoff_enabled": bool(self.drop_cutoff_enabled),
             "drop_until_profit": self.drop_until_profit,
             "drop_after_100": self.drop_after_100,
+            "drop_after_100_enabled": bool(self.drop_after_100_enabled),
             "drop_after_400": self.drop_after_400,
+            "drop_after_400_enabled": bool(self.drop_after_400_enabled),
             "sell_at_200": self.sell_at_200,
             "sell_at_400": self.sell_at_400,
             "sell_at_1000": self.sell_at_1000,
@@ -191,9 +197,12 @@ class Trade(db.Model):
     trade_kind = db.Column(db.String(20), nullable=False, default="LONG")  # <-- NEW FIELD: "LONG" or "AUTOSNIPE"
     autosnipe_sell_slippage = db.Column(db.Float, default=0.30)
     drop_cutoff = db.Column(db.Float, default=30)
+    drop_cutoff_enabled = db.Column(db.Boolean, nullable=False, default=True)
     drop_until_profit = db.Column(db.Float, default=99)
     drop_after_100 = db.Column(db.Float, default=50)
+    drop_after_100_enabled = db.Column(db.Boolean, nullable=False, default=True)
     drop_after_400 = db.Column(db.Float, default=30)
+    drop_after_400_enabled = db.Column(db.Boolean, nullable=False, default=True)
     sell_at_200 = db.Column(db.Float, default=10)
     sell_at_400 = db.Column(db.Float, default=10)
     sell_at_1000 = db.Column(db.Float, default=10)

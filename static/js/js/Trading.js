@@ -97,9 +97,12 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
     if (editingIsSniper) {
         requestData = {
             drop_cutoff: parseFloat(document.getElementById("updateDropCutoff").value),
+            drop_cutoff_enabled: !!document.getElementById("updateDropCutoffEnabled")?.checked,
             drop_until_profit: parseFloat(document.getElementById("updateDropUntilProfit").value),
             drop_after_100: parseFloat(document.getElementById("updateDropAfter100").value),
+            drop_after_100_enabled: !!document.getElementById("updateDropAfter100Enabled")?.checked,
             drop_after_400: parseFloat(document.getElementById("updateDropAfter400").value),
+            drop_after_400_enabled: !!document.getElementById("updateDropAfter400Enabled")?.checked,
             sell_at_200: parseFloat(document.getElementById("updateSellAt200").value),
             sell_at_400: parseFloat(document.getElementById("updateSellAt400").value),
             sell_at_1000: parseFloat(document.getElementById("updateSellAt1000").value),
@@ -130,6 +133,9 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
 
     // Validate inputs
     Object.entries(requestData).forEach(([key, value]) => {
+        if (typeof value === "boolean") {
+            return;
+        }
         if (value === "" || isNaN(value)) {
             isValid = false;
         }
@@ -267,9 +273,12 @@ function openEditModal(value) {
 
     if (editingIsSniper) {
         document.getElementById("updateDropCutoff").value = transaction.drop_cutoff ?? 30;
+        document.getElementById("updateDropCutoffEnabled").checked = transaction.drop_cutoff_enabled !== false;
         document.getElementById("updateDropUntilProfit").value = transaction.drop_until_profit ?? 99;
         document.getElementById("updateDropAfter100").value = transaction.drop_after_100 ?? 50;
+        document.getElementById("updateDropAfter100Enabled").checked = transaction.drop_after_100_enabled !== false;
         document.getElementById("updateDropAfter400").value = transaction.drop_after_400 ?? 30;
+        document.getElementById("updateDropAfter400Enabled").checked = transaction.drop_after_400_enabled !== false;
         document.getElementById("updateSellAt200").value = transaction.sell_at_200 ?? 10;
         document.getElementById("updateSellAt400").value = transaction.sell_at_400 ?? 10;
         document.getElementById("updateSellAt1000").value = transaction.sell_at_1000 ?? 10;
