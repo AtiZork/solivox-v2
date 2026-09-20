@@ -105,6 +105,14 @@
                   </div>
 
                   <div class="col-md-6 mb-3">
+                    <label class="form-label">Half-Transaction Additional Scan Duration (sec)</label>
+                    <input type="number" min="1" id="modal_half_txns_scan_duration" class="form-control" value="30" />
+                    <div class="form-check form-switch mt-1">
+                      <input class="form-check-input" type="checkbox" id="modal_half_txns_scan_enabled">
+                      <label class="form-check-label" for="modal_half_txns_scan_enabled">Enable Half-Transaction Extended Scan</label>
+                    </div>
+                  </div>
+                  <div class="col-md-6 mb-3">
                     <label class="form-label">Buy Slippage %</label>
                     <input type="number" id="modal_slippage" class="form-control" value="100" />
                   </div>
@@ -146,6 +154,10 @@
                   </div>
 
                   <!-- Profit target sell percentages -->
+                  <div class="col-md-4 mb-3">
+                    <label class="form-label">At 100% profit, sell %</label>
+                    <input type="number" id="modal_sell_at_100" class="form-control" value="10" />
+                  </div>
                   <div class="col-md-4 mb-3">
                     <label class="form-label">At 200% profit, sell %</label>
                     <input type="number" id="modal_sell_at_200" class="form-control" value="10" />

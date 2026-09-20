@@ -30,14 +30,17 @@ _LOCAL_WS = "ws://127.0.0.1:8900"
 if USE_LOCAL_NODE:
     _default_rpc = _LOCAL_RPC
     _default_ws = _LOCAL_WS
-    _default_ws_fallback = _MAINNET_WS  # optional backup on client server
+    # Client testing: stay on local node only — do not fall back to public mainnet
+    _default_ws_fallback = ""
+    _default_rpc_fallback = ""
 else:
     _default_rpc = _MAINNET_RPC
     _default_ws = _MAINNET_WS
     _default_ws_fallback = ""  # dev: mainnet only, no localhost attempt
+    _default_rpc_fallback = _MAINNET_RPC
 
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", _default_rpc)
-SOLANA_RPC_URL_FALLBACK = os.getenv("SOLANA_RPC_URL_FALLBACK", _MAINNET_RPC)
+SOLANA_RPC_URL_FALLBACK = os.getenv("SOLANA_RPC_URL_FALLBACK", _default_rpc_fallback)
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", _default_ws)
 SOLANA_WS_URL_FALLBACK = os.getenv("SOLANA_WS_URL_FALLBACK", _default_ws_fallback)
 

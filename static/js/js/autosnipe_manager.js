@@ -58,9 +58,10 @@ function createCardElement(sniper) {
         <p class="mb-1">Buy amount: <strong>${sniper.buy_amount}</strong> SOL</p>
         <p class="mb-1">Buy slippage: <strong>${sniper.slippage}</strong>% • Priority fee: <strong>${sniper.priority_fee}</strong> SOL</p>
         <p class="mb-1">Launch delay: <strong>${sniper.launch_delay}</strong>s</p>
+        <p class="mb-1">Half-txn extended scan: <strong>${sniper.half_txns_scan_enabled ? 'On' : 'Off'}</strong>${sniper.half_txns_scan_enabled ? ` • +${sniper.half_txns_scan_duration || 30}s` : ''}</p>
         <hr />
         <p class="mb-1">Sell drop cutoff: <strong>${sniper.drop_cutoff}</strong>% • Until profit: <strong>${sniper.drop_until_profit}</strong>%</p>
-        <p class="mb-1">Sell targets: 200%:<strong>${sniper.sell_at_200}</strong>% 400%:<strong>${sniper.sell_at_400}</strong>% 1000%:<strong>${sniper.sell_at_1000}</strong>%</p>
+        <p class="mb-1">Sell targets: 100%:<strong>${sniper.sell_at_100 ?? 10}</strong>% 200%:<strong>${sniper.sell_at_200}</strong>% 400%:<strong>${sniper.sell_at_400}</strong>% 1000%:<strong>${sniper.sell_at_1000}</strong>%</p>
         <p class="mb-0">Status: ${sniper.active ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Inactive</span>'}</p>
       </div>
     </div>
@@ -148,6 +149,7 @@ function openModalWithData(sniper) {
   const dropUntilField = document.getElementById('modal_drop_until_profit');
   const dropAfter100Field = document.getElementById('modal_drop_after_100');
   const dropAfter400Field = document.getElementById('modal_drop_after_400');
+  const sell100 = document.getElementById('modal_sell_at_100');
   const sell200 = document.getElementById('modal_sell_at_200');
   const sell400 = document.getElementById('modal_sell_at_400');
   const sell1000 = document.getElementById('modal_sell_at_1000');
@@ -164,6 +166,10 @@ function openModalWithData(sniper) {
   if (buyAmountField) buyAmountField.value = sniper.buy_amount ?? 1;
   if (slippageField) slippageField.value = sniper.slippage ?? 100;
   if (priorityFeeField) priorityFeeField.value = sniper.priority_fee ?? 0.01;
+  const halfScanEnabled = document.getElementById('modal_half_txns_scan_enabled');
+  const halfScanDuration = document.getElementById('modal_half_txns_scan_duration');
+  if (halfScanEnabled) halfScanEnabled.checked = !!sniper.half_txns_scan_enabled;
+  if (halfScanDuration) halfScanDuration.value = sniper.half_txns_scan_duration ?? 30;
   if (dropCutoffField) dropCutoffField.value = sniper.drop_cutoff ?? 30;
   if (dropUntilField) dropUntilField.value = sniper.drop_until_profit ?? 99;
   if (dropAfter100Field) dropAfter100Field.value = sniper.drop_after_100 ?? 50;
@@ -174,6 +180,7 @@ function openModalWithData(sniper) {
   if (dropCutoffEnabled) dropCutoffEnabled.checked = sniper.drop_cutoff_enabled !== false;
   if (dropAfter100Enabled) dropAfter100Enabled.checked = sniper.drop_after_100_enabled !== false;
   if (dropAfter400Enabled) dropAfter400Enabled.checked = sniper.drop_after_400_enabled !== false;
+  if (sell100) sell100.value = sniper.sell_at_100 ?? 10;
   if (sell200) sell200.value = sniper.sell_at_200 ?? 10;
   if (sell400) sell400.value = sniper.sell_at_400 ?? 10;
   if (sell1000) sell1000.value = sniper.sell_at_1000 ?? 10;
@@ -212,6 +219,7 @@ function clearModal() {
   const dropUntilField = document.getElementById('modal_drop_until_profit');
   const dropAfter100Field = document.getElementById('modal_drop_after_100');
   const dropAfter400Field = document.getElementById('modal_drop_after_400');
+  const sell100 = document.getElementById('modal_sell_at_100');
   const sell200 = document.getElementById('modal_sell_at_200');
   const sell400 = document.getElementById('modal_sell_at_400');
   const sell1000 = document.getElementById('modal_sell_at_1000');
@@ -227,6 +235,10 @@ function clearModal() {
   if (buyAmountField) buyAmountField.value = 1;
   if (slippageField) slippageField.value = 100;
   if (priorityFeeField) priorityFeeField.value = 0.01;
+  const halfScanEnabledClear = document.getElementById('modal_half_txns_scan_enabled');
+  const halfScanDurationClear = document.getElementById('modal_half_txns_scan_duration');
+  if (halfScanEnabledClear) halfScanEnabledClear.checked = false;
+  if (halfScanDurationClear) halfScanDurationClear.value = 30;
   if (dropCutoffField) dropCutoffField.value = 30;
   if (dropUntilField) dropUntilField.value = 99;
   if (dropAfter100Field) dropAfter100Field.value = 50;
@@ -237,6 +249,7 @@ function clearModal() {
   if (dropCutoffEnabled) dropCutoffEnabled.checked = true;
   if (dropAfter100Enabled) dropAfter100Enabled.checked = true;
   if (dropAfter400Enabled) dropAfter400Enabled.checked = true;
+  if (sell100) sell100.value = 10;
   if (sell200) sell200.value = 10;
   if (sell400) sell400.value = 10;
   if (sell1000) sell1000.value = 10;
@@ -257,6 +270,8 @@ async function onModalSave(e) {
     buy_txns_over_80_usd: parseFloat(document.getElementById('modal_buy_txns_over_80_usd')?.value) || 80,
     min_txns: parseInt(document.getElementById('modal_min_txns')?.value) || 5,
     launch_delay: parseInt(document.getElementById('modal_launch_delay')?.value) || 5,
+    half_txns_scan_enabled: !!document.getElementById('modal_half_txns_scan_enabled')?.checked,
+    half_txns_scan_duration: parseInt(document.getElementById('modal_half_txns_scan_duration')?.value) || 30,
     buy_amount: parseFloat(document.getElementById('modal_buy_amount')?.value) || 1,
     slippage: parseFloat(document.getElementById('modal_slippage')?.value) || 100,
     priority_fee: parseFloat(document.getElementById('modal_priority_fee')?.value) || 0.01,
@@ -267,6 +282,7 @@ async function onModalSave(e) {
     drop_after_100_enabled: !!document.getElementById('modal_drop_after_100_enabled')?.checked,
     drop_after_400: parseFloat(document.getElementById('modal_drop_after_400')?.value) || 30,
     drop_after_400_enabled: !!document.getElementById('modal_drop_after_400_enabled')?.checked,
+    sell_at_100: parseFloat(document.getElementById('modal_sell_at_100')?.value) || 10,
     sell_at_200: parseFloat(document.getElementById('modal_sell_at_200')?.value) || 10,
     sell_at_400: parseFloat(document.getElementById('modal_sell_at_400')?.value) || 10,
     sell_at_1000: parseFloat(document.getElementById('modal_sell_at_1000')?.value) || 10,

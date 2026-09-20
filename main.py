@@ -47,11 +47,15 @@ with app.app_context():
                 ("drop_cutoff_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("drop_after_100_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("drop_after_400_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("half_txns_scan_enabled", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("half_txns_scan_duration", "INTEGER NOT NULL DEFAULT 30"),
+                ("sell_at_100", "DOUBLE PRECISION DEFAULT 10"),
             ],
             "trade": [
                 ("drop_cutoff_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("drop_after_100_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("drop_after_400_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("sell_at_100", "DOUBLE PRECISION DEFAULT 10"),
             ],
         }
         try:

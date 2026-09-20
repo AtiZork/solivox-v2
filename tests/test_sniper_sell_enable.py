@@ -20,6 +20,7 @@ def _trade(**kwargs):
         drop_after_100_enabled=True,
         drop_after_400=30,
         drop_after_400_enabled=True,
+        sell_at_100=0,
         sell_at_200=0,
         sell_at_400=0,
         sell_at_1000=0,
@@ -93,6 +94,7 @@ def test_missing_enable_attrs_default_to_on():
         drop_until_profit=100000,
         drop_after_100=50,
         drop_after_400=30,
+        sell_at_100=0,
         sell_at_200=0,
         sell_at_400=0,
         sell_at_1000=0,
@@ -104,3 +106,39 @@ def test_missing_enable_attrs_default_to_on():
     amount, message = evaluate_autosnipe_sell_amount(trade, current_price=0.5)
     assert amount == 100.0
     assert "Drops below" in message
+
+
+def test_sell_at_100_triggers_at_100_percent_profit():
+    trade = _trade(
+        drop_after_100_enabled=False,
+        drop_after_400_enabled=False,
+        sell_at_100=25,
+        sell_at_200=10,
+        sell_at_400=10,
+    )
+    amount, message = evaluate_autosnipe_sell_amount(trade, current_price=2.0)
+    assert amount == 250.0
+    assert "at 100% Profit" in message
+
+
+def test_sell_at_400_still_preferred_over_sell_at_100():
+    trade = _trade(
+        drop_after_100_enabled=False,
+        drop_after_400_enabled=False,
+        sell_at_100=25,
+        sell_at_400=40,
+    )
+    amount, message = evaluate_autosnipe_sell_amount(trade, current_price=5.0)
+    assert amount == 400.0
+    assert "at 400% Profit" in message
+
+
+def test_sell_at_200_unchanged_below_100_percent_profit():
+    trade = _trade(
+        drop_cutoff_enabled=False,
+        sell_at_100=25,
+        sell_at_200=30,
+    )
+    amount, message = evaluate_autosnipe_sell_amount(trade, current_price=1.5)
+    assert amount == 300.0
+    assert "at 200% Profit" in message

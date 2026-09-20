@@ -54,20 +54,33 @@ def evaluate_autosnipe_sell_amount(trade_data, current_price, price_tracking_map
         ):
             return amount, f"Auto-Sell All after 400% profit, dropped {drop_percent:.2f}%"
 
-        return 0, None
+    # Profit-target partial sells (highest threshold first).
+    # 100% profit => 2x price; 200% uses existing <=3.0 check; 400% => 5x.
+    def _partial(pct, label):
+        pct = pct or 0
+        if pct <= 0:
+            return None
+        return amount * (pct / 100), f"Auto-Sell {pct}% at {label} Profit"
+
+    sell_at_100 = getattr(trade_data, "sell_at_100", 10)
+    for threshold, pct, label in (
+        (101.0, trade_data.sell_at_10000, "10000%"),
+        (41.0, trade_data.sell_at_4000, "4000%"),
+        (26.0, trade_data.sell_at_2500, "2500%"),
+        (16.0, trade_data.sell_at_1500, "1500%"),
+        (11.0, trade_data.sell_at_1000, "1000%"),
+        (5.0, trade_data.sell_at_400, "400%"),
+        (2.0, sell_at_100, "100%"),
+    ):
+        if profit_multiplier >= threshold:
+            result = _partial(pct, label)
+            if result is not None:
+                return result
+            # pct is 0 for this tier — keep checking lower tiers
+            continue
 
     if profit_multiplier <= 3.0:
-        return amount * (trade_data.sell_at_200 / 100), f"Auto-Sell {trade_data.sell_at_200}% at 200% Profit"
-    if profit_multiplier >= 5.0:
-        return amount * (trade_data.sell_at_400 / 100), f"Auto-Sell {trade_data.sell_at_400}% at 400% Profit"
-    if profit_multiplier >= 11.0:
-        return amount * (trade_data.sell_at_1000 / 100), f"Auto-Sell {trade_data.sell_at_1000}% at 1000% Profit"
-    if profit_multiplier >= 16.0:
-        return amount * (trade_data.sell_at_1500 / 100), f"Auto-Sell {trade_data.sell_at_1500}% at 1500% Profit"
-    if profit_multiplier >= 26.0:
-        return amount * (trade_data.sell_at_2500 / 100), f"Auto-Sell {trade_data.sell_at_2500}% at 2500% Profit"
-    if profit_multiplier >= 41.0:
-        return amount * (trade_data.sell_at_4000 / 100), f"Auto-Sell {trade_data.sell_at_4000}% at 4000% Profit"
-    if profit_multiplier >= 101.0:
-        return amount * (trade_data.sell_at_10000 / 100), f"Auto-Sell {trade_data.sell_at_10000}% at 10000% Profit"
+        result = _partial(trade_data.sell_at_200, "200%")
+        if result is not None:
+            return result
     return 0, None

@@ -246,17 +246,51 @@ def should_buy_token(token_address, user_id, config):
     Checks if a token meets the buy conditions from AutoSnipeConfig for a user.
     Phase 1: uses WebSocket stream counters when the sniper WS listener is active.
     Falls back to HTTP transaction fetching when WebSocket is disabled.
+
+    Optional half-txn extended scan (config.half_txns_scan_enabled):
+    if the normal launch_delay window ends with qualifying txs in
+    [min_txns/2, min_txns), continue scanning for an additional
+    half_txns_scan_duration seconds (added in full on top of launch_delay).
     """
+    from autosnipe_buy_logic import (
+        extended_scan_deadline,
+        should_start_half_txn_extended_scan,
+    )
+
     # config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
     if not config:
         print(f"  [Buy Condition] No active AutoSnipeConfig found for user {user_id}. Cannot determine buy conditions.")
         return False
 
     check_duration = config.launch_delay  # seconds
+    half_enabled = bool(getattr(config, "half_txns_scan_enabled", False))
+    half_duration = getattr(config, "half_txns_scan_duration", 30) or 30
     print(
         f"  [Buy Condition] Checking buy conditions for {token_address} for user {user_id} "
         f"for max {check_duration} seconds..."
     )
+
+    def _maybe_extend(start_time, qualifying, path_label: str):
+        if not should_start_half_txn_extended_scan(
+            enabled=half_enabled,
+            qualifying_count=qualifying,
+            min_txns=config.min_txns,
+        ):
+            return None
+        deadline = extended_scan_deadline(start_time, check_duration, half_duration)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            print(
+                f"[Buy Condition][{path_label}] Half-txn extended scan configured "
+                f"but deadline already passed (additional={half_duration}s)."
+            )
+            return None
+        print(
+            f"[Buy Condition][{path_label}] Qualifying={qualifying} >= half of "
+            f"{config.min_txns}; extending scan for an additional {half_duration}s "
+            f"(total window {check_duration + half_duration}s)."
+        )
+        return deadline
 
     # --- WebSocket path: read in-memory counters (no HTTP polling) ---
     try:
@@ -264,27 +298,46 @@ def should_buy_token(token_address, user_id, config):
 
         if is_ws_active():
             start_time = time.time()
+            last_qualifying = 0
             while time.time() - start_time < check_duration:
                 stats = get_mint_buy_stats(token_address, config.buy_txns_over_80_usd)
-                qualifying = stats["qualifying_count"]
+                last_qualifying = stats["qualifying_count"]
                 print(
-                    f"[Buy Condition][WS] qualifying={qualifying} / required={config.min_txns} "
+                    f"[Buy Condition][WS] qualifying={last_qualifying} / required={config.min_txns} "
                     f"(total buys={stats['total_buys']})"
                 )
-                if qualifying >= config.min_txns:
+                if last_qualifying >= config.min_txns:
                     print(
                         f"[Buy Condition][WS] Buy conditions MET for {token_address}: "
-                        f"{qualifying} transactions >= ${config.buy_txns_over_80_usd}."
+                        f"{last_qualifying} transactions >= ${config.buy_txns_over_80_usd}."
                     )
                     return True
                 time.sleep(0.2)
-            print(f"[Buy Condition][WS] Buy conditions NOT MET for {token_address} within {check_duration}s.")
+
+            extend_deadline = _maybe_extend(start_time, last_qualifying, "WS")
+            if extend_deadline is not None:
+                while time.time() < extend_deadline:
+                    stats = get_mint_buy_stats(token_address, config.buy_txns_over_80_usd)
+                    last_qualifying = stats["qualifying_count"]
+                    print(
+                        f"[Buy Condition][WS][Extended] qualifying={last_qualifying} / "
+                        f"required={config.min_txns}"
+                    )
+                    if last_qualifying >= config.min_txns:
+                        print(
+                            f"[Buy Condition][WS][Extended] Buy conditions MET for {token_address}."
+                        )
+                        return True
+                    time.sleep(0.2)
+
+            print(f"[Buy Condition][WS] Buy conditions NOT MET for {token_address} within scan window.")
             return False
     except ImportError:
         pass
 
     # --- HTTP fallback (legacy polling) ---
     start_time = time.time()
+    last_qualifying = 0
     while time.time() - start_time < check_duration:
         txns = get_token_specific_transactions(
             token_address, config.min_txns, config.buy_txns_over_80_usd
@@ -293,19 +346,39 @@ def should_buy_token(token_address, user_id, config):
             time.sleep(1)
             continue
 
-        qualifying_txns_count = 0
+        last_qualifying = 0
         for txn in txns:
             usd_value = txn['usd_value'] if txn['usd_value'] else 0.0
             if usd_value >= config.buy_txns_over_80_usd:
-                qualifying_txns_count += 1
-        print(f"[Buy Condition][HTTP] Current qualifying transactions: {qualifying_txns_count} / required: {config.min_txns}.")
+                last_qualifying += 1
+        print(f"[Buy Condition][HTTP] Current qualifying transactions: {last_qualifying} / required: {config.min_txns}.")
 
-        if qualifying_txns_count >= config.min_txns:
-            print(f"[Buy Condition][HTTP] Buy conditions MET for {token_address}: {qualifying_txns_count} transactions >= ${config.buy_txns_over_80_usd}.")
+        if last_qualifying >= config.min_txns:
+            print(f"[Buy Condition][HTTP] Buy conditions MET for {token_address}: {last_qualifying} transactions >= ${config.buy_txns_over_80_usd}.")
             return True
         time.sleep(1)
 
-    print(f"[Buy Condition][HTTP] Buy conditions NOT MET for {token_address} within {check_duration} seconds.")
+    extend_deadline = _maybe_extend(start_time, last_qualifying, "HTTP")
+    if extend_deadline is not None:
+        while time.time() < extend_deadline:
+            txns = get_token_specific_transactions(
+                token_address, config.min_txns, config.buy_txns_over_80_usd
+            )
+            last_qualifying = 0
+            for txn in (txns or []):
+                usd_value = txn['usd_value'] if txn['usd_value'] else 0.0
+                if usd_value >= config.buy_txns_over_80_usd:
+                    last_qualifying += 1
+            print(
+                f"[Buy Condition][HTTP][Extended] qualifying={last_qualifying} / "
+                f"required={config.min_txns}."
+            )
+            if last_qualifying >= config.min_txns:
+                print(f"[Buy Condition][HTTP][Extended] Buy conditions MET for {token_address}.")
+                return True
+            time.sleep(1)
+
+    print(f"[Buy Condition][HTTP] Buy conditions NOT MET for {token_address} within scan window.")
     return False
 
 def buy_token(token_address, config):
@@ -471,6 +544,7 @@ def _buy_token_internal(token_address, config):
             drop_after_100_enabled=bool(getattr(config, "drop_after_100_enabled", True)),
             drop_after_400=config.drop_after_400 if config.drop_after_400 else 30,
             drop_after_400_enabled=bool(getattr(config, "drop_after_400_enabled", True)),
+            sell_at_100=config.sell_at_100 if getattr(config, "sell_at_100", None) else 10,
             sell_at_200=config.sell_at_200 if config.sell_at_200 else 10,
             sell_at_400=config.sell_at_400 if config.sell_at_400 else 10,
             sell_at_1000=config.sell_at_1000 if config.sell_at_1000 else 10,

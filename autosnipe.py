@@ -56,15 +56,29 @@ logger = logging.getLogger(__name__)
 
 def _validate_config_payload(data):
     """Validate incoming payload for autosnipe create/update. Returns list of errors."""
+    from autosnipe_buy_logic import validate_half_txns_scan_duration
+
     errors = []
     # numeric checks
-    numeric_fields = ['buy_txns_over_80_usd','min_txns','launch_delay','buy_amount','slippage','priority_fee']
+    numeric_fields = [
+        'buy_txns_over_80_usd', 'min_txns', 'launch_delay', 'buy_amount',
+        'slippage', 'priority_fee', 'half_txns_scan_duration',
+    ]
     for f in numeric_fields:
         if f in data and data.get(f) is not None:
             try:
                 float(data.get(f))
             except Exception:
                 errors.append(f"{f} must be numeric")
+    half_enabled = False
+    if 'half_txns_scan_enabled' in data:
+        half_enabled = _parse_bool(data.get('half_txns_scan_enabled'), False)
+    errors.extend(
+        validate_half_txns_scan_duration(
+            data.get('half_txns_scan_duration'),
+            enabled=half_enabled,
+        )
+    )
     return errors
 
 
@@ -122,10 +136,14 @@ def autosnipe():
             config.slippage = float(data.get('slippage'))
         if 'priority_fee' in data:
             config.priority_fee = float(data.get('priority_fee'))
+        if 'half_txns_scan_enabled' in data:
+            config.half_txns_scan_enabled = _parse_bool(data.get('half_txns_scan_enabled'), False)
+        if 'half_txns_scan_duration' in data and data.get('half_txns_scan_duration') is not None:
+            config.half_txns_scan_duration = int(data.get('half_txns_scan_duration'))
 
         # sell-related
         for f in ['drop_cutoff','drop_until_profit','drop_after_100','drop_after_400',
-                  'sell_at_200','sell_at_400','sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000']:
+                  'sell_at_100','sell_at_200','sell_at_400','sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000']:
             if f in data:
                 try:
                     setattr(config, f, float(data.get(f)))
@@ -179,6 +197,8 @@ def list_autosnipers():
                         'buy_txns_over_80_usd': row.get('buy_txns_over_80_usd', 80),
                         'min_txns': row.get('min_txns', 5),
                         'launch_delay': row.get('launch_delay', 5),
+                        'half_txns_scan_enabled': bool(row.get('half_txns_scan_enabled')) if 'half_txns_scan_enabled' in row else False,
+                        'half_txns_scan_duration': row.get('half_txns_scan_duration', 30),
                         'buy_amount': row.get('buy_amount', 1.0),
                         'slippage': row.get('slippage', 100),
                         'priority_fee': row.get('priority_fee', 0.01),
@@ -189,6 +209,7 @@ def list_autosnipers():
                         'drop_after_100_enabled': bool(row.get('drop_after_100_enabled')) if 'drop_after_100_enabled' in row else True,
                         'drop_after_400': row.get('drop_after_400', 30),
                         'drop_after_400_enabled': bool(row.get('drop_after_400_enabled')) if 'drop_after_400_enabled' in row else True,
+                        'sell_at_100': row.get('sell_at_100', 10),
                         'sell_at_200': row.get('sell_at_200', 10),
                         'sell_at_400': row.get('sell_at_400', 10),
                         'sell_at_1000': row.get('sell_at_1000', 10),
@@ -224,6 +245,8 @@ def get_autosnipe():
                 "buy_txns_over_80_usd": config.buy_txns_over_80_usd,
                 "min_txns": config.min_txns,
                 "launch_delay": config.launch_delay,
+                "half_txns_scan_enabled": bool(getattr(config, "half_txns_scan_enabled", False)),
+                "half_txns_scan_duration": getattr(config, "half_txns_scan_duration", 30),
                 "buy_amount": config.buy_amount,
                 "slippage": config.slippage,
                 "priority_fee": config.priority_fee,
@@ -234,6 +257,7 @@ def get_autosnipe():
                 "drop_after_100_enabled": bool(getattr(config, "drop_after_100_enabled", True)),
                 "drop_after_400": config.drop_after_400,
                 "drop_after_400_enabled": bool(getattr(config, "drop_after_400_enabled", True)),
+                "sell_at_100": getattr(config, "sell_at_100", 10),
                 "sell_at_200": config.sell_at_200,
                 "sell_at_400": config.sell_at_400,
                 "sell_at_1000": config.sell_at_1000,
@@ -264,6 +288,8 @@ def get_autosnipe():
                     'buy_txns_over_80_usd': r.get('buy_txns_over_80_usd', 80),
                     'min_txns': r.get('min_txns', 5),
                     'launch_delay': r.get('launch_delay', 5),
+                    'half_txns_scan_enabled': bool(r.get('half_txns_scan_enabled')) if 'half_txns_scan_enabled' in r else False,
+                    'half_txns_scan_duration': r.get('half_txns_scan_duration', 30),
                     'buy_amount': r.get('buy_amount', 1.0),
                     'slippage': r.get('slippage', 100),
                     'priority_fee': r.get('priority_fee', 0.01),
@@ -274,6 +300,7 @@ def get_autosnipe():
                     'drop_after_100_enabled': bool(r.get('drop_after_100_enabled')) if 'drop_after_100_enabled' in r else True,
                     'drop_after_400': r.get('drop_after_400', 30),
                     'drop_after_400_enabled': bool(r.get('drop_after_400_enabled')) if 'drop_after_400_enabled' in r else True,
+                    'sell_at_100': r.get('sell_at_100', 10),
                     'sell_at_200': r.get('sell_at_200', 10),
                     'sell_at_400': r.get('sell_at_400', 10),
                     'sell_at_1000': r.get('sell_at_1000', 10),
@@ -321,8 +348,15 @@ def update_autosnipe(config_id):
                     setattr(config, f, float(data.get(f)))
                 except Exception:
                     pass
+        if 'half_txns_scan_enabled' in data:
+            config.half_txns_scan_enabled = _parse_bool(data.get('half_txns_scan_enabled'), False)
+        if 'half_txns_scan_duration' in data and data.get('half_txns_scan_duration') is not None:
+            try:
+                config.half_txns_scan_duration = int(data.get('half_txns_scan_duration'))
+            except Exception:
+                pass
         for f in ['drop_cutoff','drop_until_profit','drop_after_100','drop_after_400',
-                  'sell_at_200','sell_at_400','sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000']:
+                  'sell_at_100','sell_at_200','sell_at_400','sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000']:
             if f in data:
                 try:
                     setattr(config, f, float(data.get(f)))

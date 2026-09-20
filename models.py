@@ -69,6 +69,10 @@ class AutoSnipeConfig(db.Model):
     # Basic fields with defaults
     min_txns = db.Column(db.Integer, nullable=False, default=5)
     launch_delay = db.Column(db.Integer, nullable=False, default=5)
+    # Conditional extended scan: if normal window hits >= 50% of min_txns,
+    # continue for half_txns_scan_duration additional seconds.
+    half_txns_scan_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    half_txns_scan_duration = db.Column(db.Integer, nullable=False, default=30)
     buy_amount = db.Column(db.Float, nullable=False, default=1.0)
     slippage = db.Column(db.Float, nullable=False, default=100)
     priority_fee = db.Column(db.Float, nullable=False, default=0.01)
@@ -83,6 +87,7 @@ class AutoSnipeConfig(db.Model):
     drop_after_400_enabled = db.Column(db.Boolean, nullable=False, default=True)
 
     # Sell at target profit % fields with defaults
+    sell_at_100 = db.Column(db.Float, default=10)
     sell_at_200 = db.Column(db.Float, default=10)
     sell_at_400 = db.Column(db.Float, default=10)
     sell_at_1000 = db.Column(db.Float, default=10)
@@ -100,6 +105,8 @@ class AutoSnipeConfig(db.Model):
             "buy_txns_over_80_usd": self.buy_txns_over_80_usd,
             "min_txns": self.min_txns,
             "launch_delay": self.launch_delay,
+            "half_txns_scan_enabled": bool(self.half_txns_scan_enabled),
+            "half_txns_scan_duration": self.half_txns_scan_duration,
             "buy_amount": self.buy_amount,
             "slippage": self.slippage,
             "priority_fee": self.priority_fee,
@@ -110,6 +117,7 @@ class AutoSnipeConfig(db.Model):
             "drop_after_100_enabled": bool(self.drop_after_100_enabled),
             "drop_after_400": self.drop_after_400,
             "drop_after_400_enabled": bool(self.drop_after_400_enabled),
+            "sell_at_100": self.sell_at_100,
             "sell_at_200": self.sell_at_200,
             "sell_at_400": self.sell_at_400,
             "sell_at_1000": self.sell_at_1000,
@@ -203,6 +211,7 @@ class Trade(db.Model):
     drop_after_100_enabled = db.Column(db.Boolean, nullable=False, default=True)
     drop_after_400 = db.Column(db.Float, default=30)
     drop_after_400_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    sell_at_100 = db.Column(db.Float, default=10)
     sell_at_200 = db.Column(db.Float, default=10)
     sell_at_400 = db.Column(db.Float, default=10)
     sell_at_1000 = db.Column(db.Float, default=10)
