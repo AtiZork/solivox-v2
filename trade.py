@@ -303,7 +303,10 @@ def get_trades():
                 "drop_after_100_enabled": bool(getattr(trade, "drop_after_100_enabled", True)),
                 "drop_after_400": trade.drop_after_400,
                 "drop_after_400_enabled": bool(getattr(trade, "drop_after_400_enabled", True)),
+<<<<<<< HEAD
                 "sell_at_100": getattr(trade, "sell_at_100", 10),
+=======
+>>>>>>> ec5200bd70db51478209a0253126656679f1485a
                 "sell_at_200": trade.sell_at_200,
                 "sell_at_400": trade.sell_at_400,
                 "sell_at_1000": trade.sell_at_1000,
@@ -364,7 +367,10 @@ def update_trade(trade_id):
             "drop_after_100_enabled": "drop_after_100_enabled",
             "drop_after_400": "drop_after_400",
             "drop_after_400_enabled": "drop_after_400_enabled",
+<<<<<<< HEAD
             "sell_at_100": "sell_at_100",
+=======
+>>>>>>> ec5200bd70db51478209a0253126656679f1485a
             "sell_at_200": "sell_at_200",
             "sell_at_400": "sell_at_400",
             "sell_at_1000": "sell_at_1000",
