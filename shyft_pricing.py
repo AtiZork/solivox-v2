@@ -48,6 +48,18 @@ TOKEN_METADATA_PROGRAM_ID = Pubkey.from_string("metaqbxxUerdq28cj1RbAWkYQm3ybzjb
 PYTH_SOL_PRICE_FEED = Pubkey.from_string("7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE")
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 
+# PumpSwap (Pump.fun's own AMM) — where tokens migrate once their bonding
+# curve completes. Program ID + Pool account layout confirmed against the
+# official IDL (github.com/pump-fun/pump-public-docs/blob/main/idl/pump_amm.json)
+# and cross-validated against a live pool's on-chain bytes.
+PUMPSWAP_PROGRAM_ID = Pubkey.from_string("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA")
+_PUMPSWAP_POOL_DATA_SIZE = 301
+_PUMPSWAP_BASE_MINT_OFFSET = 43
+_PUMPSWAP_QUOTE_MINT_OFFSET = 75
+_PUMPSWAP_BASE_VAULT_OFFSET = 139
+_PUMPSWAP_QUOTE_VAULT_OFFSET = 171
+_PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET = 245
+
 _SECRET_QUERY_KEYS = {"api_key", "api-key", "x-api-key", "token", "access_token"}
 _WS_RECONNECT_DELAY_SEC = 2.0
 _WS_MAX_RECONNECT_DELAY_SEC = 60.0
@@ -96,6 +108,10 @@ class TokenPriceSnapshot:
 
 class ShyftPricingError(Exception):
     """Raised when Shyft pricing cannot be resolved."""
+
+
+class BondingCurveMigratedError(ShyftPricingError):
+    """Raised when a bonding curve has completed/migrated; its reserves are frozen/stale."""
 
 
 class ShyftPricingService:
@@ -431,6 +447,16 @@ class ShyftPricingService:
                 return float(vs) / (float(vt) * 1000.0)
         return None
 
+    @staticmethod
+    def _bonding_curve_is_complete(raw: bytes) -> bool:
+        """
+        True once the Pump.fun bonding curve has migrated (graduated) off-curve
+        (e.g. to PumpSwap). Layout: discriminator(8) + 5x u64 reserves(40) +
+        complete:bool(1) at byte offset 48. Once set, the curve's reserves are
+        frozen forever, so any price parsed from it afterward is stale, not live.
+        """
+        return len(raw) > 48 and raw[48] != 0
+
     def get_sol_usd(self) -> Optional[float]:
         raw = self._get_account_bytes(PYTH_SOL_PRICE_FEED)
         if not raw or len(raw) < 93:
@@ -448,6 +474,11 @@ class ShyftPricingService:
         raw = self._get_account_bytes(curve)
         if not raw:
             raise ShyftPricingError("bonding curve account not found (token may be graduated or non-pump)")
+        if self._bonding_curve_is_complete(raw):
+            raise BondingCurveMigratedError(
+                f"token {mint} has migrated off the Pump.fun bonding curve (complete=true); "
+                "its bonding-curve reserves are frozen/stale"
+            )
 
         price_sol = self._price_sol_from_bonding_raw(raw)
         if price_sol is None:
@@ -462,6 +493,112 @@ class ShyftPricingService:
             "usd_price": usd,
             "sol_price_usd": sol_usd,
             "source": "shyft_rpc_pumpfun_bonding_curve",
+        }
+
+    def is_bonding_curve_migrated(self, mint: str) -> bool:
+        """Cheap pre-check: has this mint's bonding curve completed (migrated off-curve)?"""
+        try:
+            raw = self._get_account_bytes(self.bonding_curve_pda(mint))
+        except Exception:
+            return False
+        return bool(raw) and self._bonding_curve_is_complete(raw)
+
+    # ------------------------------------------------------------------
+    # PumpSwap (post-migration) pricing
+    # ------------------------------------------------------------------
+    def find_pumpswap_pool(self, mint: str) -> Optional[str]:
+        """
+        Locate the PumpSwap pool where `mint` is the base token, via
+        getProgramAccounts + memcmp on base_mint. Pump.fun migrations always
+        create the pool with the project's token as base and WSOL as quote.
+        """
+        result = self._rpc(
+            "getProgramAccounts",
+            [
+                str(PUMPSWAP_PROGRAM_ID),
+                {
+                    "encoding": "base64",
+                    "filters": [
+                        {"dataSize": _PUMPSWAP_POOL_DATA_SIZE},
+                        {"memcmp": {"offset": _PUMPSWAP_BASE_MINT_OFFSET, "bytes": mint}},
+                    ],
+                },
+            ],
+        )
+        if not result:
+            return None
+        return result[0]["pubkey"]
+
+    def get_pumpswap_pool_price(self, mint: str) -> dict[str, Any]:
+        """
+        Fetch the live price of a migrated token from its PumpSwap pool.
+
+        Price = effective_quote_reserves / base_reserves, decimal-adjusted,
+        where effective_quote_reserves = quote_vault.amount + Pool.virtual_quote_reserves
+        (per Pump.fun's own PumpSwap docs). Reserves are read live from the
+        pool's two SPL token vault accounts — never frozen like a completed
+        bonding curve.
+        """
+        mint = (mint or "").strip()
+        if not mint:
+            raise ShyftPricingError("mint address is required")
+
+        pool_addr = self.find_pumpswap_pool(mint)
+        if not pool_addr:
+            raise ShyftPricingError(f"no PumpSwap pool found for migrated mint {mint}")
+
+        raw = self._get_account_bytes(pool_addr)
+        if not raw or len(raw) < _PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET + 16:
+            raise ShyftPricingError(f"PumpSwap pool account malformed for mint {mint}")
+
+        base_mint = str(Pubkey.from_bytes(raw[_PUMPSWAP_BASE_MINT_OFFSET : _PUMPSWAP_BASE_MINT_OFFSET + 32]))
+        quote_mint = str(Pubkey.from_bytes(raw[_PUMPSWAP_QUOTE_MINT_OFFSET : _PUMPSWAP_QUOTE_MINT_OFFSET + 32]))
+        base_vault = str(Pubkey.from_bytes(raw[_PUMPSWAP_BASE_VAULT_OFFSET : _PUMPSWAP_BASE_VAULT_OFFSET + 32]))
+        quote_vault = str(Pubkey.from_bytes(raw[_PUMPSWAP_QUOTE_VAULT_OFFSET : _PUMPSWAP_QUOTE_VAULT_OFFSET + 32]))
+        virtual_quote_reserves = int.from_bytes(
+            raw[_PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET : _PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET + 16],
+            "little",
+            signed=True,
+        )
+
+        if base_mint != mint:
+            raise ShyftPricingError(f"PumpSwap pool base_mint mismatch for {mint}")
+
+        base_bal = (self._rpc("getTokenAccountBalance", [base_vault]) or {}).get("value")
+        quote_bal = (self._rpc("getTokenAccountBalance", [quote_vault]) or {}).get("value")
+        if not base_bal or not quote_bal:
+            raise ShyftPricingError(f"could not read PumpSwap vault balances for {mint}")
+
+        base_amount = int(base_bal["amount"])
+        base_decimals = int(base_bal["decimals"])
+        quote_amount = int(quote_bal["amount"])
+        quote_decimals = int(quote_bal["decimals"])
+
+        if base_amount <= 0:
+            raise ShyftPricingError(f"PumpSwap pool has zero base reserves for {mint}")
+
+        effective_quote_raw = quote_amount + virtual_quote_reserves
+        if effective_quote_raw <= 0:
+            raise ShyftPricingError(f"PumpSwap pool has non-positive effective quote reserves for {mint}")
+
+        price_in_quote = (effective_quote_raw / (10**quote_decimals)) / (base_amount / (10**base_decimals))
+
+        price_in_sol: Optional[float] = None
+        sol_usd: Optional[float] = None
+        usd: Optional[float] = None
+        if quote_mint == WSOL_MINT:
+            price_in_sol = price_in_quote
+            sol_usd = self.get_sol_usd()
+            usd = (price_in_sol * sol_usd) if sol_usd is not None else None
+
+        return {
+            "mint": mint,
+            "bonding_curve": None,
+            "pumpswap_pool": pool_addr,
+            "price_in_sol": price_in_sol,
+            "usd_price": usd,
+            "sol_price_usd": sol_usd,
+            "source": "shyft_rpc_pumpswap_pool",
         }
 
     def get_latest_price(self, mint: str, include_token_details: bool = True) -> TokenPriceSnapshot:
@@ -479,6 +616,10 @@ class ShyftPricingService:
 
         try:
             price = self.get_bonding_curve_price(mint)
+        except BondingCurveMigratedError:
+            # Token has graduated off the bonding curve — price it from its
+            # PumpSwap pool instead of returning the frozen/stale curve price.
+            price = self.get_pumpswap_pool_price(mint)
         except ShyftPricingError:
             # Native SOL / WSOL: quote via Pyth only
             if mint in (WSOL_MINT, "11111111111111111111111111111111"):

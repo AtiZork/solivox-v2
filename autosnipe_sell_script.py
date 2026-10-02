@@ -12,6 +12,7 @@ from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client
 from shyft_pricing import get_token_price
+from yellowstone_pricing import YellowstonePricingError, get_yellowstone_price, is_yellowstone_enabled
 from utils import get_token_metadata
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -61,6 +62,27 @@ sell_trade_bp = Blueprint('sell_trade_bp', __name__)
 price_tracking = {}
 
 
+def get_sniper_sell_price(token_address: str) -> dict:
+    """
+    Latest price for a Sniper sell decision.
+
+    Yellowstone when enabled (USE_GEYSER=true + GEYSER_GRPC_URL set); falls
+    back to the existing Shyft path only while Yellowstone is
+    disabled/unconfigured, so today's behavior is unchanged until it's
+    turned on.
+    """
+    if is_yellowstone_enabled():
+        price_data = get_yellowstone_price(token_address)
+        print(
+            "[Sell Price][Yellowstone/Geyser] Successfully retrieved "
+            f"token={token_address} usd_price={price_data.get('usdPrice')} "
+            f"source={price_data.get('source', 'Yellowstone/Geyser')}",
+            flush=True,
+        )
+        return price_data
+    return get_token_price(token_address)
+
+
 def auto_snipe_auto_sell_schedular(app):
     scheduler = BackgroundScheduler(daemon=True)
     # Auto-snipe logic to sell tokens based on configurable conditions
@@ -71,14 +93,18 @@ def auto_snipe_auto_sell_schedular(app):
                 # Fetch trades that have not been executed
                 trades = Trade.query.filter_by(executed=False, auto_snipe=True).order_by(Trade.id.desc()).all()
                 for trade_data in trades:
-                    # Fetch the price of the token associated with the trade
+                    # A failed/invalid Yellowstone fetch skips this trade for the
+                    # current cycle rather than selling on a stale or guessed price.
                     try:
-                        current_price_ = get_token_price(trade_data.token_address)
+                        current_price_ = get_sniper_sell_price(trade_data.token_address)
                         current_price = current_price_['usdPrice']
+                    except YellowstonePricingError as e:
+                        logger.warning(f"Yellowstone price fetch failed for trade {trade_data.id}: {e}")
+                        continue
                     except Exception as e:
                         logger.warning(f"Failed to fetch price for trade {trade_data.id}: {e}")
                         continue
-                    if not current_price:
+                    if not current_price or current_price <= 0:
                         continue
                     initial_price = trade_data.initial_price
                     if initial_price <= 0:

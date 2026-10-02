@@ -10,9 +10,11 @@ import pytest
 import requests
 
 from shyft_pricing import (
+    BondingCurveMigratedError,
     ShyftPricingError,
     ShyftPricingService,
     TokenPriceSnapshot,
+    WSOL_MINT,
     _redact_url,
     is_valid_mint,
 )
@@ -21,10 +23,11 @@ from shyft_pricing import (
 PUMP_MINT = "6BFPDdf7VdkFdzePjWzVENzgigzs1DJmZJhKtjiTpump"
 
 
-def _bonding_raw(vt: int = 1_000_000_000_000, vs: int = 30_000_000_000) -> bytes:
+def _bonding_raw(vt: int = 1_000_000_000_000, vs: int = 30_000_000_000, complete: bool = False) -> bytes:
     raw = bytearray(64)
     raw[8:16] = int(vt).to_bytes(8, "little")
     raw[16:24] = int(vs).to_bytes(8, "little")
+    raw[48] = 1 if complete else 0
     return bytes(raw)
 
 
@@ -207,6 +210,178 @@ def test_get_latest_price_combines_details_and_curve(service: ShyftPricingServic
 def test_missing_mint_raises(service: ShyftPricingService):
     with pytest.raises(ShyftPricingError):
         service.get_latest_price("   ")
+
+
+def test_bonding_curve_is_complete():
+    assert ShyftPricingService._bonding_curve_is_complete(_bonding_raw(complete=True)) is True
+    assert ShyftPricingService._bonding_curve_is_complete(_bonding_raw(complete=False)) is False
+    assert ShyftPricingService._bonding_curve_is_complete(b"\x00" * 10) is False  # too short to tell
+
+
+def test_get_bonding_curve_price_raises_on_migrated_token(service: ShyftPricingService):
+    """A migrated (complete=true) bonding curve must never yield a price — it's frozen/stale."""
+    migrated = _bonding_raw(complete=True)
+    with patch.object(service, "_get_account_bytes", return_value=migrated):
+        with pytest.raises(ShyftPricingError, match="migrated"):
+            service.get_bonding_curve_price(PUMP_MINT)
+
+
+def test_get_latest_price_raises_on_migrated_token(service: ShyftPricingService):
+    """get_token_price()'s underlying call must not silently return a stale post-migration price."""
+    migrated = _bonding_raw(complete=True)
+    with patch.object(service, "_get_account_bytes", return_value=migrated), patch.object(
+        service,
+        "get_token_details",
+        return_value={"name": "Graduated", "symbol": "GRAD", "decimals": 6, "raw": {}},
+    ), patch.object(
+        service, "get_pumpswap_pool_price", side_effect=ShyftPricingError("no pool")
+    ):
+        with pytest.raises(ShyftPricingError, match="no pool"):
+            service.get_latest_price(PUMP_MINT)
+
+
+# ---------------------------------------------------------------------------
+# PumpSwap (post-migration) pricing
+# ---------------------------------------------------------------------------
+
+_POOL_BASE_MINT_OFFSET = 43
+_POOL_QUOTE_MINT_OFFSET = 75
+_POOL_BASE_VAULT_OFFSET = 139
+_POOL_QUOTE_VAULT_OFFSET = 171
+_POOL_VIRTUAL_QUOTE_RESERVES_OFFSET = 245
+
+
+def _pumpswap_pool_raw(
+    base_mint: str,
+    quote_mint: str = WSOL_MINT,
+    base_vault: str = None,
+    quote_vault: str = None,
+    virtual_quote_reserves: int = 0,
+) -> bytes:
+    import base58
+
+    base_vault = base_vault or base58.b58encode(bytes([1]) * 32).decode()
+    quote_vault = quote_vault or base58.b58encode(bytes([2]) * 32).decode()
+
+    def decode32(s: str) -> bytes:
+        b = base58.b58decode(s)
+        assert len(b) == 32, f"test fixture pubkey {s!r} did not decode to 32 bytes"
+        return b
+
+    raw = bytearray(301)
+    raw[_POOL_BASE_MINT_OFFSET : _POOL_BASE_MINT_OFFSET + 32] = decode32(base_mint)
+    raw[_POOL_QUOTE_MINT_OFFSET : _POOL_QUOTE_MINT_OFFSET + 32] = decode32(quote_mint)
+    raw[_POOL_BASE_VAULT_OFFSET : _POOL_BASE_VAULT_OFFSET + 32] = decode32(base_vault)
+    raw[_POOL_QUOTE_VAULT_OFFSET : _POOL_QUOTE_VAULT_OFFSET + 32] = decode32(quote_vault)
+    raw[_POOL_VIRTUAL_QUOTE_RESERVES_OFFSET : _POOL_VIRTUAL_QUOTE_RESERVES_OFFSET + 16] = (
+        int(virtual_quote_reserves).to_bytes(16, "little", signed=True)
+    )
+    return bytes(raw)
+
+
+def test_is_bonding_curve_migrated(service: ShyftPricingService):
+    with patch.object(service, "_get_account_bytes", return_value=_bonding_raw(complete=True)):
+        assert service.is_bonding_curve_migrated(PUMP_MINT) is True
+    with patch.object(service, "_get_account_bytes", return_value=_bonding_raw(complete=False)):
+        assert service.is_bonding_curve_migrated(PUMP_MINT) is False
+    with patch.object(service, "_get_account_bytes", side_effect=Exception("rpc down")):
+        assert service.is_bonding_curve_migrated(PUMP_MINT) is False
+
+
+def test_find_pumpswap_pool_returns_first_match(service: ShyftPricingService):
+    with patch.object(service, "_rpc", return_value=[{"pubkey": "PoolAddr111111111111111111111111111111111"}]) as rpc:
+        pool = service.find_pumpswap_pool(PUMP_MINT)
+    assert pool == "PoolAddr111111111111111111111111111111111"
+    method, params = rpc.call_args[0]
+    assert method == "getProgramAccounts"
+    assert params[1]["filters"][0] == {"dataSize": 301}
+    assert params[1]["filters"][1]["memcmp"]["bytes"] == PUMP_MINT
+
+
+def test_find_pumpswap_pool_returns_none_when_not_found(service: ShyftPricingService):
+    with patch.object(service, "_rpc", return_value=[]):
+        assert service.find_pumpswap_pool(PUMP_MINT) is None
+
+
+def test_get_pumpswap_pool_price_success(service: ShyftPricingService):
+    import base58
+
+    pool_addr = "PoolAddr111111111111111111111111111111111"
+    base_vault = base58.b58encode(bytes([7]) * 32).decode()
+    quote_vault = base58.b58encode(bytes([9]) * 32).decode()
+    pool_raw = _pumpswap_pool_raw(
+        base_mint=PUMP_MINT,
+        quote_mint=WSOL_MINT,
+        base_vault=base_vault,
+        quote_vault=quote_vault,
+        virtual_quote_reserves=1_000_000_000,  # 1 SOL of virtual reserves
+    )
+
+    def fake_rpc(method, params):
+        if method == "getTokenAccountBalance":
+            addr = params[0]
+            if addr == base_vault:
+                return {"value": {"amount": "1000000000000", "decimals": 6}}  # 1,000,000 tokens
+            if addr == quote_vault:
+                return {"value": {"amount": "9000000000", "decimals": 9}}  # 9 SOL
+        return None
+
+    with patch.object(service, "find_pumpswap_pool", return_value=pool_addr), patch.object(
+        service, "_get_account_bytes", return_value=pool_raw
+    ), patch.object(service, "_rpc", side_effect=fake_rpc), patch.object(
+        service, "get_sol_usd", return_value=150.0
+    ):
+        price = service.get_pumpswap_pool_price(PUMP_MINT)
+
+    # effective_quote = 9 + 1 = 10 SOL; base = 1,000,000 tokens -> price = 0.00001 SOL/token
+    assert price["price_in_sol"] == pytest.approx(0.00001)
+    assert price["usd_price"] == pytest.approx(0.00001 * 150.0)
+    assert price["sol_price_usd"] == 150.0
+    assert price["pumpswap_pool"] == pool_addr
+    assert price["source"] == "shyft_rpc_pumpswap_pool"
+
+
+def test_get_pumpswap_pool_price_raises_when_no_pool_found(service: ShyftPricingService):
+    with patch.object(service, "find_pumpswap_pool", return_value=None):
+        with pytest.raises(ShyftPricingError, match="no PumpSwap pool found"):
+            service.get_pumpswap_pool_price(PUMP_MINT)
+
+
+def test_get_pumpswap_pool_price_raises_on_base_mint_mismatch(service: ShyftPricingService):
+    other_mint = "So11111111111111111111111111111111111111112"
+    pool_raw = _pumpswap_pool_raw(base_mint=other_mint)  # mismatched vs PUMP_MINT
+    with patch.object(service, "find_pumpswap_pool", return_value="PoolAddr111111111111111111111111111111111"), patch.object(
+        service, "_get_account_bytes", return_value=pool_raw
+    ):
+        with pytest.raises(ShyftPricingError, match="mismatch"):
+            service.get_pumpswap_pool_price(PUMP_MINT)
+
+
+def test_get_latest_price_falls_back_to_pumpswap_on_migration(service: ShyftPricingService):
+    """End-to-end (mocked): migrated bonding curve -> get_latest_price uses the PumpSwap price."""
+    migrated = _bonding_raw(complete=True)
+    fake_pumpswap_price = {
+        "mint": PUMP_MINT,
+        "bonding_curve": None,
+        "pumpswap_pool": "PoolAddr111111111111111111111111111111111",
+        "price_in_sol": 0.00001,
+        "usd_price": 0.0015,
+        "sol_price_usd": 150.0,
+        "source": "shyft_rpc_pumpswap_pool",
+    }
+    with patch.object(service, "_get_account_bytes", return_value=migrated), patch.object(
+        service, "get_pumpswap_pool_price", return_value=fake_pumpswap_price
+    ) as pumpswap_call, patch.object(
+        service,
+        "get_token_details",
+        return_value={"name": "Graduated", "symbol": "GRAD", "decimals": 6, "raw": {}},
+    ):
+        snap = service.get_latest_price(PUMP_MINT)
+
+    pumpswap_call.assert_called_once_with(PUMP_MINT)
+    assert snap.source == "shyft_rpc_pumpswap_pool"
+    assert snap.usd_price == pytest.approx(0.0015)
+    assert snap.price_in_sol == pytest.approx(0.00001)
 
 
 def test_get_token_price_reusable_helper():

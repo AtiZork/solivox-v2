@@ -7,7 +7,7 @@ load_dotenv()
 # Wallet key storage
 # Dev (Windows):  set SECURE_DIRECTORY=C:\Users\...\Documents
 # Client (Linux): set SECURE_DIRECTORY=/home/rwts/Documents
-secure_directory = os.getenv("SECURE_DIRECTORY", "/home/rwts/Documents")
+secure_directory = os.getenv("SECURE_DIRECTORY", "/home/user/Documents")
 
 # ---------------------------------------------------------------------------
 # Solana RPC / WebSocket endpoints
@@ -99,3 +99,15 @@ shyfet_api_key = SHYFT_API_KEY
 WEBSOCKET_KEY_SHYFET = SHYFT_WS_URL
 SHYFET_RPC = SHYFT_RPC_URL
 SHYFET_WS_URL = SHYFT_WS_URL
+
+# ---------------------------------------------------------------------------
+# Yellowstone / Geyser gRPC (sniper sell-flow price fetch only).
+# USE_GEYSER=false keeps the sniper sell scheduler on the existing Shyft
+# pricing path unchanged; set true once GEYSER_GRPC_URL/GEYSER_GRPC_TOKEN
+# point at a real Yellowstone endpoint.
+# ---------------------------------------------------------------------------
+USE_GEYSER = os.getenv("USE_GEYSER", "false").lower() == "true"
+GEYSER_GRPC_URL = os.getenv("GEYSER_GRPC_URL", "")
+GEYSER_GRPC_TOKEN = os.getenv("GEYSER_GRPC_TOKEN", "")
+GEYSER_USE_TLS = os.getenv("GEYSER_USE_TLS", "true").lower() == "true"
+GEYSER_PRICE_TIMEOUT_SEC = float(os.getenv("GEYSER_PRICE_TIMEOUT_SEC", "8"))

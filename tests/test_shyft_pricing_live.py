@@ -10,7 +10,7 @@ import pytest
 
 from shyft_pricing import ShyftPricingError, get_shyft_pricing_service
 
-PUMP_MINT = "6BFPDdf7VdkFdzePjWzVENzgigzs1DJmZJhKtjiTpump"
+PUMP_MINT = "5gok7WzHvMFmFfcvnHuuBqRh9GTcQckHXBBwZywkpump"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 
 pytestmark = pytest.mark.integration
@@ -21,7 +21,24 @@ def service():
     return get_shyft_pricing_service()
 
 
+def _skip_if_migrated(service, mint):
+    """
+    PUMP_MINT is a real, live mainnet mint — it can graduate off the Pump.fun
+    bonding curve to PumpSwap at any time (independent of this test suite).
+    A migrated bonding curve's reserves are permanently frozen, so
+    get_latest_price() correctly raises ShyftPricingError instead of
+    returning a stale price. That's the pricing code behaving correctly, not
+    a live-fixture failure — skip rather than fail so this test doesn't rot
+    the next time PUMP_MINT happens to graduate.
+    """
+    curve = service.bonding_curve_pda(mint)
+    raw = service._get_account_bytes(curve)
+    if raw and service._bonding_curve_is_complete(raw):
+        pytest.skip(f"{mint} has migrated off the Pump.fun bonding curve since this test was last updated")
+
+
 def test_shyft_token_details_and_price_real_mint(service):
+    _skip_if_migrated(service, PUMP_MINT)
     details = service.get_token_details(PUMP_MINT)
     assert details.get("mint") == PUMP_MINT
     # Name/symbol may be empty for some mints; address must round-trip
@@ -45,6 +62,7 @@ def test_shyft_second_mint_wsol(service):
 
 
 def test_shyft_ws_stream_initial_update(service):
+    _skip_if_migrated(service, PUMP_MINT)
     updates = []
     done = threading.Event()
 
