@@ -238,9 +238,11 @@ def attach_wallet():
 
 
 @wallet_bp.route('/recover_wallet', methods=['POST'])
+@jwt_required()
 def recover_wallet():
     """Recover wallet using recovery phrase, store private key securely in a file, and save details in the database."""
     try:
+        user_id = get_jwt_identity()
         data = request.json
 
         # Check if the recovery phrase is provided
@@ -301,7 +303,7 @@ def recover_wallet():
         os.chmod(private_key_path, 0o600)
 
         # Store the public key and private key file path in the database
-        new_wallet = Wallet(public_key=public_key_str, private_key_path=private_key_path, title="")
+        new_wallet = Wallet(public_key=public_key_str, private_key_path=private_key_path, user_id=int(user_id), title="")
         db.session.add(new_wallet)
         db.session.commit()
 
