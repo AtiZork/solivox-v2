@@ -25,6 +25,7 @@ from websockets import connect
 from settings import (
     PUMP_FUN_PROGRAM_ID_STR,
     SNIPER_HTTP_FALLBACK,
+    SNIPER_RPC_MIN_INTERVAL_SEC,
     SNIPER_USE_WEBSOCKET,
     get_solana_ws_urls,
     solana_client,
@@ -39,8 +40,9 @@ WSOL_MINT = "So11111111111111111111111111111111111111112"
 _WS_RECONNECT_DELAY_SEC = 3
 _WS_MAX_RECONNECT_DELAY_SEC = 60
 
-# Public RPC is heavily rate-limited; throttle sniper get_transaction calls.
-_RPC_MIN_INTERVAL_SEC = 0.25
+# Throttle sniper get_transaction calls. Default is tuned for rate-limited
+# public RPC; override via SNIPER_RPC_MIN_INTERVAL_SEC for a local validator.
+_RPC_MIN_INTERVAL_SEC = SNIPER_RPC_MIN_INTERVAL_SEC
 _RPC_LOCK = threading.Lock()
 _LAST_RPC_AT = 0.0
 

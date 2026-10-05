@@ -62,6 +62,11 @@ PUMP_FUN_PROGRAM_ID_STR = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 SNIPER_USE_WEBSOCKET = os.getenv("SNIPER_USE_WEBSOCKET", "true").lower() == "true"
 SNIPER_HTTP_FALLBACK = os.getenv("SNIPER_HTTP_FALLBACK", "true").lower() == "true"
 
+# Minimum gap (seconds) between sniper get_transaction RPC calls (mint/buy
+# resolution). Default is tuned for rate-limited public RPC; a dedicated
+# local validator (USE_LOCAL_NODE=true) can usually handle a much lower value.
+SNIPER_RPC_MIN_INTERVAL_SEC = float(os.getenv("SNIPER_RPC_MIN_INTERVAL_SEC", "0.25"))
+
 # Dashboard live pricing: accountSubscribe on Pump.fun bonding curves → TokenPrice table.
 PRICE_USE_WEBSOCKET = os.getenv("PRICE_USE_WEBSOCKET", "true").lower() == "true"
 PRICE_HTTP_FALLBACK = os.getenv("PRICE_HTTP_FALLBACK", "true").lower() == "true"
