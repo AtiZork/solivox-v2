@@ -1,4 +1,5 @@
 import secrets
+import base58
 
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
@@ -160,6 +161,50 @@ def get_private_key_from_mnemonic(mnemonic_phrase):
         raise ValueError(f"Invalid mnemonic: {str(e)}")
 
 
+def normalize_private_key_value(private_key_value):
+    """Accept hex, base58, or mnemonic inputs for a Solana wallet."""
+    if private_key_value is None:
+        raise ValueError("Private key is required")
+
+    normalized_value = str(private_key_value).strip().strip('"').strip("'")
+    normalized_value = normalized_value.replace("\r", "").replace("\n", "")
+
+    if not normalized_value:
+        raise ValueError("Private key is empty")
+
+    # Recover wallet flows often use a 12/24-word mnemonic phrase.
+    if " " in normalized_value:
+        return get_private_key_from_mnemonic(normalized_value)
+
+    # Common Solana private keys are base58-encoded, not hex.
+    if len(normalized_value) % 2 == 0 and set(normalized_value) <= set("0123456789abcdefABCDEF"):
+        decoded_hex = bytes.fromhex(normalized_value)
+        if len(decoded_hex) in (32, 64):
+            return decoded_hex
+
+    try:
+        decoded_base58 = base58.b58decode(normalized_value)
+        if len(decoded_base58) in (32, 64):
+            return decoded_base58
+    except Exception:
+        pass
+
+    raise ValueError("Invalid private key or mnemonic format")
+
+
+def build_keypair_from_private_key(private_key_value):
+    """Build a Solana Keypair from a hex, base58, or mnemonic input."""
+    private_key_bytes = normalize_private_key_value(private_key_value)
+
+    if len(private_key_bytes) == 32:
+        return Keypair.from_seed(private_key_bytes)
+
+    if len(private_key_bytes) == 64:
+        return Keypair.from_bytes(private_key_bytes)
+
+    raise ValueError("Private key length is invalid")
+
+
 """
 attach wallet
 """
@@ -171,7 +216,7 @@ def attach_wallet():
     """Attach a wallet, store the private key securely, and save in the database."""
     try:
         user_id = get_jwt_identity()
-        data = request.json
+        data = request.json or {}
 
         if not data.get("private_key") or not data.get("public_key"):
             return jsonify({"status": "failed", "message": "Missing private_key or public_key"}), 400
@@ -179,31 +224,34 @@ def attach_wallet():
         private_key_str = data["private_key"]
         public_key_str = data["public_key"]
 
-        # Convert private key (supports both mnemonic and hex formats)
+        private_key_str = str(private_key_str).strip().strip('"').strip("'")
+        public_key_str = str(public_key_str).strip().strip('"').strip("'")
+
         try:
-            if " " in private_key_str:  # If it's a mnemonic phrase
-                private_key_bytes = get_private_key_from_mnemonic(private_key_str)
-            else:
-                private_key_bytes = bytes.fromhex(private_key_str)  # If hex, use directly
+            private_key_bytes = normalize_private_key_value(private_key_str)
         except Exception:
             return jsonify({"status": "failed", "message": "Invalid private key or mnemonic format"}), 400
 
-        # Validate public key format
         try:
-            public_key = (Pubkey.from_string(public_key_str))
+            Pubkey.from_string(public_key_str)
         except Exception:
             return jsonify({"status": "failed", "message": "Invalid public key format"}), 400
 
-        # Recreate the keypair from the private key
-        keypair = Keypair.from_seed(private_key_bytes)
+        try:
+            if len(private_key_bytes) == 32:
+                keypair = Keypair.from_seed(private_key_bytes)
+            elif len(private_key_bytes) == 64:
+                keypair = Keypair.from_bytes(private_key_bytes)
+            else:
+                raise ValueError("Private key length is invalid")
+        except Exception:
+            return jsonify({"status": "failed", "message": "Invalid private key format"}), 400
 
-        # Ensure derived public key matches provided one
         if str(keypair.pubkey()) != public_key_str:
             return jsonify({"status": "failed", "message": "Provided private key does not match the public key"}), 400
 
-        # Check if wallet exists on Solana mainnet
-        if not wallet_exists_on_solana(public_key_str):
-            return jsonify({"status": "failed", "message": "Wallet does not exist on Solana"}), 400
+        # A valid wallet can be attached even if it has never been funded or used on-chain.
+        # The important check is that the private key derives to the provided public key.
 
         # Check if the wallet already exists in the database
         # existing_wallet = Wallet.query.filter_by(public_key=public_key_str).first()
