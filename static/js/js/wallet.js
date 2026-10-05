@@ -339,11 +339,18 @@ document.getElementById("createwalletForm").addEventListener("submit",  async  f
 
 
         try {
+            const token = localStorage.getItem("token");
+            if (!token) {
+                alert("Your session has expired. Please log in again.");
+                return;
+            }
+
             // Send POST Request
             const response = await fetch(apiUrl, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
                 },
                 body: JSON.stringify(data),
             });

@@ -243,6 +243,9 @@ def recover_wallet():
     """Recover wallet using recovery phrase, store private key securely in a file, and save details in the database."""
     try:
         user_id = get_jwt_identity()
+        if user_id is None:
+            return jsonify({"status": "failed", "message": "Authentication required to recover a wallet"}), 401
+        user_id = int(user_id)
         data = request.json
 
         # Check if the recovery phrase is provided
