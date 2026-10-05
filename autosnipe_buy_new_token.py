@@ -446,7 +446,7 @@ def _buy_token_internal(token_address, config):
         }
 
         quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
-        quote_response = requests.get(quote_endpoint, params=quote_params, headers=headers)
+        quote_response = requests.get(quote_endpoint, params=quote_params, headers=headers, timeout=15)
 
         if quote_response.status_code != 200:
             try:
@@ -470,7 +470,7 @@ def _buy_token_internal(token_address, config):
         }
 
         swap_endpoint = f"{API_BASE_URL}/swap/v1/swap"
-        swap_response = requests.post(swap_endpoint, json=swap_request, headers=headers)
+        swap_response = requests.post(swap_endpoint, json=swap_request, headers=headers, timeout=15)
 
         if swap_response.status_code != 200:
             try:

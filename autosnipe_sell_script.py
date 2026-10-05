@@ -150,7 +150,7 @@ def auto_snipe_auto_sell_schedular(app):
                         }
 
                         quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
-                        quote_response = requests.get(quote_endpoint, params=quote_params, headers=headers)
+                        quote_response = requests.get(quote_endpoint, params=quote_params, headers=headers, timeout=15)
                         if quote_response.status_code != 200:
                             logger.error(f"Error fetching quote: {quote_response.json()}")
                             continue
@@ -166,7 +166,7 @@ def auto_snipe_auto_sell_schedular(app):
                         }
 
                         swap_endpoint = f"{API_BASE_URL}/swap/v1/swap"
-                        swap_response = requests.post(swap_endpoint, json=swap_request, headers=headers)
+                        swap_response = requests.post(swap_endpoint, json=swap_request, headers=headers, timeout=15)
                         if swap_response.status_code != 200:
                             logger.error(f"Error performing swap: {swap_response.json()}")
                             continue
