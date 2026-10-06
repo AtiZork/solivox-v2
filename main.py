@@ -28,13 +28,7 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 # for production
 # socketio = SocketIO(app, async_mode="eventlet")
-# Previously hardcoded here (committed to git — must be treated as compromised).
-# Now read from env; if unset, a random secret is generated per-process-start
-# (safe default: invalidates old JWTs rather than reusing a known value, and
-# forces explicit configuration for a deployment that needs tokens to survive
-# a restart). Set JWT_SECRET_KEY in .env for production.
-import secrets as _secrets
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY') or _secrets.token_hex(32)
+app.config['JWT_SECRET_KEY'] = 'kHadk1-fmayaXHlx3PmEdS_NKMAsqPsVNa6c-QzPgic'  # change to secure key
 jwt = JWTManager(app)
 
 CORS(app)  # This allows all origins
