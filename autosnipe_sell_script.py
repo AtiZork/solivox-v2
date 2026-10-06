@@ -70,16 +70,31 @@ def get_sniper_sell_price(token_address: str) -> dict:
     back to the existing Shyft path only while Yellowstone is
     disabled/unconfigured, so today's behavior is unchanged until it's
     turned on.
+
+    Yellowstone's accountSubscribe only ever delivers a price while the
+    token is actively trading - a token that has gone quiet (no more
+    buys/sells) will time out on every single cycle forever, since there is
+    no new account update for it to push. When that happens, fall back to a
+    Shyft RPC snapshot read (a point-in-time account fetch, not a
+    subscription, so it works regardless of trading activity) instead of
+    skipping the trade indefinitely.
     """
     if is_yellowstone_enabled():
-        price_data = get_yellowstone_price(token_address)
-        print(
-            "[Sell Price][Yellowstone/Geyser] Successfully retrieved "
-            f"token={token_address} usd_price={price_data.get('usdPrice')} "
-            f"source={price_data.get('source', 'Yellowstone/Geyser')}",
-            flush=True,
-        )
-        return price_data
+        try:
+            price_data = get_yellowstone_price(token_address)
+            print(
+                "[Sell Price][Yellowstone/Geyser] Successfully retrieved "
+                f"token={token_address} usd_price={price_data.get('usdPrice')} "
+                f"source={price_data.get('source', 'Yellowstone/Geyser')}",
+                flush=True,
+            )
+            return price_data
+        except YellowstonePricingError as exc:
+            logger.warning(
+                f"Yellowstone price fetch failed for {token_address} "
+                f"({exc}); falling back to Shyft RPC snapshot."
+            )
+            return get_token_price(token_address)
     return get_token_price(token_address)
 
 

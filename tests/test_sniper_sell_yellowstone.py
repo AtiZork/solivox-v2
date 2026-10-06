@@ -6,7 +6,7 @@ and propagates the fetched price unmodified.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -50,12 +50,38 @@ def test_falls_back_to_shyft_when_yellowstone_disabled():
     assert result["usdPrice"] == 4.56
 
 
-def test_yellowstone_failure_propagates_as_yellowstone_error():
-    """The scheduler loop relies on this to skip-and-retry rather than sell on a bad price."""
+def test_yellowstone_failure_falls_back_to_shyft():
+    """
+    A token that has stopped trading will never get a pushed Yellowstone
+    update (accountSubscribe times out forever), so a Yellowstone failure
+    must fall back to a Shyft RPC snapshot read instead of skipping the
+    trade indefinitely.
+    """
+    shyft_result = {"usdPrice": 7.89, "usd_price": 7.89, "source": "shyft_rpc_pumpfun_bonding_curve"}
+
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
         sell_script,
         "get_yellowstone_price",
         side_effect=YellowstonePricingError("unavailable"),
-    ):
-        with pytest.raises(YellowstonePricingError):
+    ) as yellowstone_fetch, patch.object(
+        sell_script, "get_token_price", return_value=shyft_result
+    ) as shyft_fetch, patch.object(sell_script, "logger", MagicMock()):
+        result = sell_script.get_sniper_sell_price(PUMP_MINT)
+
+    yellowstone_fetch.assert_called_once_with(PUMP_MINT)
+    shyft_fetch.assert_called_once_with(PUMP_MINT)
+    assert result["usdPrice"] == 7.89
+
+
+def test_yellowstone_and_shyft_both_failing_propagates():
+    """If the Shyft fallback itself fails too, the scheduler loop's generic
+    except-Exception branch is relied on to skip-and-retry."""
+    with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
+        sell_script,
+        "get_yellowstone_price",
+        side_effect=YellowstonePricingError("unavailable"),
+    ), patch.object(
+        sell_script, "get_token_price", side_effect=RuntimeError("shyft also down")
+    ), patch.object(sell_script, "logger", MagicMock()):
+        with pytest.raises(RuntimeError):
             sell_script.get_sniper_sell_price(PUMP_MINT)
