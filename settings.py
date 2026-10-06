@@ -67,6 +67,18 @@ SNIPER_HTTP_FALLBACK = os.getenv("SNIPER_HTTP_FALLBACK", "true").lower() == "tru
 # local validator (USE_LOCAL_NODE=true) can usually handle a much lower value.
 SNIPER_RPC_MIN_INTERVAL_SEC = float(os.getenv("SNIPER_RPC_MIN_INTERVAL_SEC", "0.25"))
 
+# Bounded worker pools for sniper event processing (replaces one-OS-thread-
+# per-event, which grows without limit under real load). Event pool handles
+# quick RPC lookups (mint/buy resolution); decision pool handles the
+# longer-lived buy-condition-check + buy-execution callback per new token.
+SNIPER_EVENT_POOL_SIZE = int(os.getenv("SNIPER_EVENT_POOL_SIZE", "50"))
+SNIPER_DECISION_POOL_SIZE = int(os.getenv("SNIPER_DECISION_POOL_SIZE", "20"))
+
+# How long (seconds) to keep tracking a mint's buy stream after it launched.
+# Past this, its buy-decision window has long closed, so we unsubscribe and
+# stop tracking it — otherwise subscriptions (and event volume) grow forever.
+SNIPER_MINT_TRACKING_TTL_SEC = float(os.getenv("SNIPER_MINT_TRACKING_TTL_SEC", "180"))
+
 # Dashboard live pricing: accountSubscribe on Pump.fun bonding curves → TokenPrice table.
 PRICE_USE_WEBSOCKET = os.getenv("PRICE_USE_WEBSOCKET", "true").lower() == "true"
 PRICE_HTTP_FALLBACK = os.getenv("PRICE_HTTP_FALLBACK", "true").lower() == "true"

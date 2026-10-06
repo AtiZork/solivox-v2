@@ -14,6 +14,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -24,7 +25,10 @@ from websockets import connect
 
 from settings import (
     PUMP_FUN_PROGRAM_ID_STR,
+    SNIPER_DECISION_POOL_SIZE,
+    SNIPER_EVENT_POOL_SIZE,
     SNIPER_HTTP_FALLBACK,
+    SNIPER_MINT_TRACKING_TTL_SEC,
     SNIPER_RPC_MIN_INTERVAL_SEC,
     SNIPER_USE_WEBSOCKET,
     get_solana_ws_urls,
@@ -49,6 +53,23 @@ _LAST_RPC_AT = 0.0
 # Async loop bridge: subscribe to per-mint buy streams after Create.
 _ws_loop: Optional[asyncio.AbstractEventLoop] = None
 _mint_subscribe_queue: Optional[asyncio.Queue] = None
+
+# Bounded worker pools — replaces unbounded threading.Thread-per-event, which
+# grew without limit under real load (one OS thread per Create/Buy, forever).
+_event_pool = ThreadPoolExecutor(max_workers=SNIPER_EVENT_POOL_SIZE, thread_name_prefix="sniper-evt")
+_decision_pool = ThreadPoolExecutor(max_workers=SNIPER_DECISION_POOL_SIZE, thread_name_prefix="sniper-dec")
+
+
+def _submit_logged(pool: ThreadPoolExecutor, fn: Callable, *args) -> None:
+    """Submit to a bounded pool, logging (not silently swallowing) any exception."""
+
+    def _wrapped() -> None:
+        try:
+            fn(*args)
+        except Exception:
+            logger.exception("Unhandled error in %s", getattr(fn, "__name__", fn))
+
+    pool.submit(_wrapped)
 
 # Base58 pump.fun mint addresses end with "pump"
 _PUMP_MINT_RE = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}pump")
@@ -121,6 +142,17 @@ class SniperStreamState:
     def get_tracked_mint_set(self) -> set[str]:
         with self._lock:
             return set(self.mint_registry.keys())
+
+    def get_stale_mints(self, cutoff_time: float) -> list[str]:
+        """Mints whose buy-decision window closed long ago (launch_time < cutoff_time)."""
+        with self._lock:
+            return [m for m, tracker in self.mint_registry.items() if tracker.launch_time < cutoff_time]
+
+    def drop_mint(self, mint: str) -> None:
+        """Stop tracking a mint (its decision window is long closed) and free its buy history."""
+        with self._lock:
+            self.mint_registry.pop(mint, None)
+            self.processed_mints.add(mint)
 
     def add_buy(self, mint: str, buy: BuyEvent) -> None:
         with self._lock:
@@ -323,12 +355,7 @@ def _process_create(signature: str, logs: list) -> None:
     logger.info("[WS] New Pump.fun token: %s (sig %s...)", mint, signature[:16])
     _request_mint_subscription(mint)
     if _on_new_token:
-        threading.Thread(
-            target=_run_new_token_callback,
-            args=(mint,),
-            daemon=True,
-            name=f"sniper-token-{mint[:8]}",
-        ).start()
+        _submit_logged(_decision_pool, _run_new_token_callback, mint)
 
 
 def _handle_create(signature: str, logs: list) -> None:
@@ -337,12 +364,7 @@ def _handle_create(signature: str, logs: list) -> None:
     if not stream_state.mark_signature_seen(signature):
         return
     # Resolve mint via RPC in background so the WS loop stays responsive.
-    threading.Thread(
-        target=_process_create,
-        args=(signature, list(logs)),
-        daemon=True,
-        name=f"sniper-create-{signature[:8]}",
-    ).start()
+    _submit_logged(_event_pool, _process_create, signature, list(logs))
 
 
 def _run_new_token_callback(mint: str) -> None:
@@ -393,12 +415,7 @@ def _process_mint_buy(mint: str, signature: str, logs: list) -> None:
 
 
 def _handle_mint_buy(mint: str, signature: str, logs: list) -> None:
-    threading.Thread(
-        target=_process_mint_buy,
-        args=(mint, signature, list(logs)),
-        daemon=True,
-        name=f"sniper-buy-{mint[:8]}",
-    ).start()
+    _submit_logged(_event_pool, _process_mint_buy, mint, signature, list(logs))
 
 
 async def _pump_fun_ws_loop() -> None:
@@ -411,10 +428,38 @@ async def _pump_fun_ws_loop() -> None:
     while _listener_running:
         ws_url = ws_urls[url_index % len(ws_urls)]
         mint_sub_ids: dict[int, str] = {}
+        sub_id_by_mint: dict[str, int] = {}
         pending_sub_requests: dict[str, str] = {}
         mint_subscribe_queue: asyncio.Queue = asyncio.Queue()
         _mint_subscribe_queue = mint_subscribe_queue
         _ws_loop = asyncio.get_running_loop()
+        last_prune_at = time.time()
+
+        async def prune_stale_mints(ws) -> None:
+            """
+            Unsubscribe + stop tracking mints whose buy-decision window closed
+            long ago. Without this, every per-mint buy-stream subscription we
+            ever open stays open forever, so event volume (and the threads it
+            spawns) only ever grows the longer the service runs.
+            """
+            cutoff = time.time() - SNIPER_MINT_TRACKING_TTL_SEC
+            stale_mints = stream_state.get_stale_mints(cutoff)
+            for mint in stale_mints:
+                sub_id = sub_id_by_mint.pop(mint, None)
+                if sub_id is not None:
+                    mint_sub_ids.pop(sub_id, None)
+                    try:
+                        await ws.send(json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": f"unsub-{mint[:12]}",
+                            "method": "logsUnsubscribe",
+                            "params": [sub_id],
+                        }))
+                    except Exception as exc:
+                        logger.debug("[WS] Failed to unsubscribe %s: %s", mint[:16], exc)
+                stream_state.drop_mint(mint)
+            if stale_mints:
+                logger.info("[WS] Pruned %d stale mint subscription(s).", len(stale_mints))
 
         async def drain_mint_subscribe_queue(ws) -> None:
             while True:
@@ -472,6 +517,10 @@ async def _pump_fun_ws_loop() -> None:
                     if not _listener_running:
                         break
                     await drain_mint_subscribe_queue(ws)
+                    now = time.time()
+                    if (now - last_prune_at) >= 30:
+                        await prune_stale_mints(ws)
+                        last_prune_at = now
                     try:
                         data = json.loads(raw)
                     except json.JSONDecodeError:
@@ -485,6 +534,7 @@ async def _pump_fun_ws_loop() -> None:
                             mint_sub = data.get("result")
                             if mint_sub:
                                 mint_sub_ids[mint_sub] = mint
+                                sub_id_by_mint[mint] = mint_sub
                                 logger.info(
                                     "[WS] Buy stream active for %s (sub=%s)",
                                     mint[:16],
