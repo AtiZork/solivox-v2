@@ -131,7 +131,15 @@ def auto_snipe_auto_sell_schedular(app):
 
                         with open(private_key_path, 'rb') as key_file:
                             private_key_bytes = key_file.read()
-                        wallet_keypair = SoldersKeypair.from_seed(private_key_bytes)
+                        if len(private_key_bytes) == 32:
+                            wallet_keypair = SoldersKeypair.from_seed(private_key_bytes)
+                        elif len(private_key_bytes) == 64:
+                            wallet_keypair = SoldersKeypair.from_bytes(private_key_bytes)
+                        else:
+                            logger.error(
+                                f"Invalid private key length ({len(private_key_bytes)}) for trade {trade_data.id}, skipping."
+                            )
+                            continue
 
                         metadata = get_token_metadata(trade_data.token_address)
                         if metadata:
