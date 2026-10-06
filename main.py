@@ -28,7 +28,13 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 # for production
 # socketio = SocketIO(app, async_mode="eventlet")
-app.config['JWT_SECRET_KEY'] = 'kHadk1-fmayaXHlx3PmEdS_NKMAsqPsVNa6c-QzPgic'  # change to secure key
+# Previously hardcoded here (committed to git — must be treated as compromised).
+# Now read from env; if unset, a random secret is generated per-process-start
+# (safe default: invalidates old JWTs rather than reusing a known value, and
+# forces explicit configuration for a deployment that needs tokens to survive
+# a restart). Set JWT_SECRET_KEY in .env for production.
+import secrets as _secrets
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY') or _secrets.token_hex(32)
 jwt = JWTManager(app)
 
 CORS(app)  # This allows all origins
@@ -178,5 +184,10 @@ if __name__ == "__main__":
        from autosnipe_buy_new_token import start_sniper_ingestion
 
        start_sniper_ingestion()
-   socketio.run(app, host="0.0.0.0", port=8000, debug=True, allow_unsafe_werkzeug=True)
+   # debug=False (NOT True) — debug=True wires in Werkzeug's interactive
+   # debugger (evalex=True), which lets anyone who can trigger an unhandled
+   # error on this publicly-bound (0.0.0.0) server execute arbitrary Python
+   # code. use_reloader stays True so WERKZEUG_RUN_MAIN still gets set in the
+   # child process, which the scheduler/sniper startup block above depends on.
+   socketio.run(app, host="0.0.0.0", port=8000, debug=False, use_reloader=True, allow_unsafe_werkzeug=True)
     # app.run(host="0.0.0.0", port=8000, debug=True)
