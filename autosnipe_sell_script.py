@@ -156,12 +156,20 @@ def auto_snipe_auto_sell_schedular(app):
                             )
                             continue
 
+                        # Jupiter's token-metadata endpoint (unlike its swap/quote
+                        # engine) lags on brand-new tokens and 404s for them — fall
+                        # back to 6, the standard decimals for every Pump.fun/SPL
+                        # token this bot trades, not 0. A decimals=0 fallback here
+                        # previously shrank amount_in_lamports by 10^6x (e.g. 32918
+                        # tokens -> 32918 raw units instead of 32918322876), which
+                        # Jupiter's quote endpoint then rejected as NO_ROUTES_FOUND
+                        # for being a dust-sized trade.
                         metadata = get_token_metadata(trade_data.token_address)
-                        if metadata:
-                            decimals = metadata.get("decimals", 0)
+                        if metadata and metadata.get("decimals") is not None:
+                            decimals = metadata.get("decimals")
                             print(f"Token has {decimals} decimals")
                         else:
-                            decimals = 0
+                            decimals = 6
 
                         amount_in_lamports = int(amount_to_trade * (10 ** decimals))
 
