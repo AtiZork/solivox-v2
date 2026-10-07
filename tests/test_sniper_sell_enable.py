@@ -142,3 +142,20 @@ def test_sell_at_200_unchanged_below_100_percent_profit():
     amount, message = evaluate_autosnipe_sell_amount(trade, current_price=1.5)
     assert amount == 300.0
     assert "at 200% Profit" in message
+
+
+def test_sell_at_200_does_not_fire_at_a_loss():
+    """
+    Regression test: profit_multiplier < 1.0 (price below buy price, i.e. a
+    loss) must never match the sell_at_200 tier. Without the >1.0 floor this
+    tier matched unconditionally for any multiplier <= 3.0, including at a
+    loss, and sold tokens labeled "at 200% Profit" while underwater.
+    """
+    trade = _trade(
+        drop_cutoff_enabled=False,  # isolate sell_at_200 from the drop-cutoff exit
+        sell_at_100=25,
+        sell_at_200=30,
+    )
+    amount, message = evaluate_autosnipe_sell_amount(trade, current_price=0.93)
+    assert amount == 0
+    assert message is None

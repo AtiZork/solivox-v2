@@ -79,7 +79,10 @@ def evaluate_autosnipe_sell_amount(trade_data, current_price, price_tracking_map
             # pct is 0 for this tier — keep checking lower tiers
             continue
 
-    if profit_multiplier <= 3.0:
+    # Only applies while actually in profit (multiplier > 1.0) — without this
+    # floor, a trade sitting at a loss (e.g. multiplier 0.93) would match
+    # this unconditionally and sell labeled "at 200% Profit" while underwater.
+    if 1.0 < profit_multiplier <= 3.0:
         result = _partial(trade_data.sell_at_200, "200%")
         if result is not None:
             return result
