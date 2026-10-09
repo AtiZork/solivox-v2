@@ -76,6 +76,15 @@ SNIPER_DECISION_POOL_SIZE = int(os.getenv("SNIPER_DECISION_POOL_SIZE", "20"))
 # Concurrent price fetches per sniper sell cycle. Sells themselves stay
 # sequential; raise with care, Shyft RPC/gRPC rate limits apply.
 SNIPER_SELL_PRICE_WORKERS = int(os.getenv("SNIPER_SELL_PRICE_WORKERS", "10"))
+# Instant sells: re-check an open trade the moment its token trades (node
+# WebSocket logsSubscribe per open mint). The periodic cycle stays as a safety net.
+SNIPER_SELL_STREAM = os.getenv("SNIPER_SELL_STREAM", "true").lower() == "true"
+SNIPER_SELL_STREAM_SYNC_SEC = float(os.getenv("SNIPER_SELL_STREAM_SYNC_SEC", "5"))
+SNIPER_SELL_EVENT_WORKERS = int(os.getenv("SNIPER_SELL_EVENT_WORKERS", "8"))
+# After a sell attempt that can't succeed yet, wait before retrying the same
+# trade: wallet holds 0 tokens -> EMPTY, any other failure -> RETRY.
+SNIPER_SELL_EMPTY_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_EMPTY_COOLDOWN_SEC", "60"))
+SNIPER_SELL_RETRY_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_RETRY_COOLDOWN_SEC", "2"))
 
 # How long (seconds) to keep tracking a mint's buy stream after it launched.
 # Past this, its buy-decision window has long closed, so we unsubscribe and

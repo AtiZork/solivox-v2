@@ -288,10 +288,19 @@ def harness(tmp_path):
         def start(self):
             pass
 
+    def _filter_by(**kw):
+        def _rows():
+            rows = [t for t in h.trades if not t.executed]
+            if "token_address" in kw:
+                rows = [t for t in rows if t.token_address == kw["token_address"]]
+            return rows
+        query = MagicMock()
+        query.all.side_effect = _rows
+        query.order_by.return_value.all.side_effect = _rows
+        return query
+
     trade_model = MagicMock()
-    trade_model.query.filter_by.return_value.order_by.return_value.all.side_effect = (
-        lambda: [t for t in h.trades if not t.executed]
-    )
+    trade_model.query.filter_by.side_effect = _filter_by
     default_wallet = SimpleNamespace(public_key="WalletPubkey", private_key=str(key_file))
     wallet_model = MagicMock()
     wallet_model.query.filter_by.side_effect = lambda **kw: SimpleNamespace(
@@ -339,20 +348,26 @@ def harness(tmp_path):
     h.logger = MagicMock()
     h.requests = requests_mock
     sell_script.price_tracking.clear()
+    sell_script._retry_after.clear()
 
+    h.stream = MagicMock()
+    h.db = MagicMock()
+    h.app = Flask("test")
     with patch.object(sell_script, "BackgroundScheduler", _Scheduler), \
+         patch.object(sell_script, "SellStream", h.stream), \
          patch.object(sell_script, "atexit", MagicMock()), \
          patch.object(sell_script, "Trade", trade_model), \
          patch.object(sell_script, "Wallet", wallet_model), \
          patch.object(sell_script, "TradeHistory", h.history), \
-         patch.object(sell_script, "db", MagicMock()), \
+         patch.object(sell_script, "db", h.db), \
+         patch.object(sell_script, "get_token_price", side_effect=lambda mint, **kw: _price(mint)), \
          patch.object(sell_script, "requests", requests_mock), \
          patch.object(sell_script, "solana_client", solana_mock), \
          patch.object(sell_script, "VersionedTransaction", _FakeVersionedTx), \
          patch.object(sell_script, "get_wallet_token_balance", side_effect=_balance), \
          patch.object(sell_script, "get_sniper_sell_price", side_effect=_price), \
          patch.object(sell_script, "logger", h.logger):
-        sell_script.auto_snipe_auto_sell_schedular(Flask("test"))
+        sell_script.auto_snipe_auto_sell_schedular(h.app)
         h.run_cycle = h.jobs[0]
         yield h
 
@@ -478,9 +493,59 @@ def test_loop_jupiter_quote_failure_keeps_trade_retryable(harness):
     assert other.executed is True  # failure didn't stop the rest of the cycle
 
     harness.quote_status = {}
+    harness.run_cycle()  # still inside the retry cooldown: no hammering
+    assert tp.last_tp_tier == 0
+
+    sell_script._retry_after[2] = 0  # cooldown elapsed
     harness.run_cycle()
     assert tp.last_tp_tier == 2.0
     assert tp.purchased_token_amount == pytest.approx(900.0)
+
+
+def test_empty_wallet_trade_is_not_retried_during_cooldown(harness):
+    gone = _live_config_trade(id=4, token_address="MintGone")
+    harness.trades = [gone]
+    harness.prices = {"MintGone": 0.5}
+    harness.balances = {"MintGone": 0}
+
+    for _ in range(5):
+        harness.run_cycle()
+
+    empty_warnings = [c for c in harness.logger.warning.call_args_list if "Wallet holds 0" in str(c.args[0])]
+    assert len(empty_warnings) == 1  # one balance check, then backed off
+    assert harness.requests.get.call_count == 0  # never quoted
+    assert sell_script._retry_after[4] > time.monotonic() + 50  # ~60s back-off
+
+
+def test_failed_send_retries_after_short_cooldown(harness):
+    tp = _live_config_trade(id=5, token_address="MintTP")
+    harness.trades = [tp]
+    harness.prices = {"MintTP": 2.33}
+    harness.send_error = "Blockhash not found"
+
+    harness.run_cycle()
+    wait = sell_script._retry_after[5] - time.monotonic()
+    assert 0 < wait <= sell_script.SNIPER_SELL_RETRY_COOLDOWN_SEC
+
+    harness.send_error = None
+    sell_script._retry_after[5] = 0
+    harness.run_cycle()
+    assert harness.sent == 1
+    assert 5 not in sell_script._retry_after
+
+
+def test_db_failure_after_send_backs_off_instead_of_reselling(harness):
+    tp = _live_config_trade(id=6, token_address="MintTP")
+    harness.trades = [tp]
+    harness.prices = {"MintTP": 2.33}
+    harness.db.session.commit.side_effect = RuntimeError("db down")
+
+    harness.run_cycle()
+    harness.run_cycle()
+
+    assert harness.sent == 1  # the second cycle must not sell again on the stale row
+    assert "but DB update failed" in _logged(harness, "error")
+    assert sell_script._retry_after[6] > time.monotonic() + 50
 
 
 def test_loop_failed_send_does_not_record_sale(harness):
@@ -584,3 +649,160 @@ def test_loop_many_trades_each_processed_exactly_once(harness):
             assert t.executed is True
         else:
             assert t.tp_pct_sold == 10 and t.purchased_token_amount == pytest.approx(900.0)
+
+
+# --- Instant path (sell the moment a token trades) ------------------------
+
+def test_scheduler_starts_sell_stream_wired_to_instant_check(harness):
+    harness.stream.assert_called_once()
+    harness.stream.return_value.start.assert_called_once()
+    kwargs = harness.stream.call_args.kwargs
+
+    tp = _live_config_trade(id=2, token_address="MintTP")
+    harness.trades = [tp]
+    harness.prices = {"MintTP": 2.33}
+    with patch.object(sell_script, "check_trades_for_mint") as check:
+        kwargs["on_activity"]("MintTP")
+        deadline = time.monotonic() + 2
+        while not check.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+    check.assert_called_once_with(harness.app, "MintTP")
+
+
+def test_sell_stream_disabled_by_setting(tmp_path):
+    with patch.object(sell_script, "SNIPER_SELL_STREAM", False), \
+         patch.object(sell_script, "SellStream") as stream, \
+         patch.object(sell_script, "BackgroundScheduler", MagicMock()), \
+         patch.object(sell_script, "atexit", MagicMock()):
+        sell_script.auto_snipe_auto_sell_schedular(Flask("test"))
+    stream.assert_not_called()
+
+
+def test_instant_check_sells_when_rule_met(harness):
+    tp = _live_config_trade(id=2, token_address="MintTP")
+    other = _live_config_trade(id=3, token_address="MintOther")
+    harness.trades = [tp, other]
+    harness.prices = {"MintTP": 2.33, "MintOther": 0.5}
+
+    sell_script.check_trades_for_mint(harness.app, "MintTP")
+
+    assert harness.sent == 1
+    assert tp.tp_pct_sold == 10
+    assert other.executed is False  # only the token that traded is re-checked
+    assert "[Sell decision][instant] trade 2 (MintTP)" in _logged(harness, "info")
+
+
+def test_instant_check_no_rule_no_sale(harness):
+    trade = _live_config_trade(id=2, token_address="MintFlat")
+    harness.trades = [trade]
+    harness.prices = {"MintFlat": 1.2}
+
+    sell_script.check_trades_for_mint(harness.app, "MintFlat")
+
+    assert harness.sent == 0
+    assert trade.purchased_token_amount == 1000.0
+
+
+def test_instant_check_price_failure_is_logged_not_raised(harness):
+    trade = _live_config_trade(id=2, token_address="MintBad")
+    harness.trades = [trade]
+    harness.prices = {"MintBad": RuntimeError("Shyft 429")}
+
+    sell_script.check_trades_for_mint(harness.app, "MintBad")
+
+    assert harness.sent == 0
+    assert "[Instant] check failed for MintBad" in _logged(harness, "warning")
+
+
+def test_trade_being_sold_by_one_path_is_skipped_by_the_other(harness):
+    trade = _live_config_trade(id=7, token_address="MintSL")
+    harness.trades = [trade]
+    harness.prices = {"MintSL": 0.5}
+
+    lock = sell_script._trade_lock(7)
+    lock.acquire()
+    try:
+        harness.run_cycle()  # instant path "holds" the trade: cycle must not sell it
+        assert harness.sent == 0
+    finally:
+        lock.release()
+
+    harness.run_cycle()
+    assert harness.sent == 1
+    assert trade.executed is True
+
+
+def test_cycle_sees_sale_made_by_instant_path_meanwhile(harness):
+    trade = _live_config_trade(id=8, token_address="MintSL")
+    harness.trades = [trade]
+    harness.prices = {"MintSL": 0.5}
+    # The cycle loaded the trade earlier; by the time it gets the lock the
+    # instant path has sold it, which the fresh DB read reveals.
+    harness.db.session.refresh.side_effect = lambda t: setattr(t, "executed", True)
+
+    with patch.object(sell_script.Trade.query, "filter_by", side_effect=lambda **kw: SimpleNamespace(
+        order_by=lambda *a: SimpleNamespace(all=lambda: [trade]), all=lambda: [trade])):
+        harness.run_cycle()
+
+    assert harness.sent == 0
+
+
+def test_concurrent_instant_and_cycle_sell_exactly_once(harness):
+    trade = _live_config_trade(id=9, token_address="MintSL")
+    harness.trades = [trade]
+    harness.prices = {"MintSL": 0.5}
+    harness.price_delays = {"MintSL": 0.05}
+
+    import threading
+    workers = [threading.Thread(target=harness.run_cycle)] + [
+        threading.Thread(target=sell_script.check_trades_for_mint, args=(harness.app, "MintSL")) for _ in range(5)
+    ]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+
+    assert harness.sent == 1
+    assert trade.executed is True
+
+
+def test_activity_bursts_are_coalesced():
+    calls = []
+    started = __import__("threading").Event()
+
+    def slow_check(app, mint):
+        calls.append(time.monotonic())
+        started.set()
+        time.sleep(0.2)
+
+    with patch.object(sell_script, "check_trades_for_mint", side_effect=slow_check):
+        sell_script.on_token_activity("app", "MintBurst")
+        started.wait(1)
+        for _ in range(50):  # 50 trades on the token while the first check runs
+            sell_script.on_token_activity("app", "MintBurst")
+        time.sleep(0.7)
+
+    assert len(calls) == 2  # the running check + exactly one follow-up
+    assert "MintBurst" not in sell_script._instant_running
+
+
+def test_open_trade_mints_lists_open_auto_snipe_mints():
+    rows = [("MintA",), ("MintB",)]
+    trade = MagicMock()
+    trade.query.with_entities.return_value.filter_by.return_value.all.return_value = rows
+    with patch.object(sell_script, "Trade", trade):
+        assert sell_script._open_trade_mints(Flask("test")) == {"MintA", "MintB"}
+    trade.query.with_entities.return_value.filter_by.assert_called_once_with(executed=False, auto_snipe=True)
+
+
+def test_unroutable_token_backs_off_long(harness):
+    trade = _live_config_trade(id=11, token_address="MintDead")
+    harness.trades = [trade]
+    harness.prices = {"MintDead": 0.5}
+    harness.quote_status = {"MintDead": 400}  # harness answers NO_ROUTES_FOUND
+
+    for _ in range(4):
+        harness.run_cycle()
+
+    assert len(_quoted_amounts(harness)) == 1
+    assert sell_script._retry_after[11] > time.monotonic() + 50
