@@ -144,6 +144,55 @@ def test_trailing_stop_after_100_percent_reachable_with_live_config():
     assert decision.take_profit_tier is None
 
 
+# --- Wallet balance read --------------------------------------------------
+
+TOKEN_2022 = sell_script.Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+OWNER = sell_script.Pubkey.from_string("8nVc5BL7xoq9QWQ4AoM2AAcca9DPPzgnqZuv9VqBP61F")
+MINT_330 = "2zJ5SWBbsZLifcqWKm1uk6vcqWfWsLm3ud7NkafZpump"
+
+
+def _expected_ata(owner, program, mint):
+    return sell_script.Pubkey.find_program_address(
+        [bytes(owner), bytes(program), bytes(sell_script.Pubkey.from_string(mint))],
+        sell_script.ASSOCIATED_TOKEN_PROGRAM_ID,
+    )[0]
+
+
+def test_wallet_balance_reads_token_2022_ata_without_secondary_index():
+    ata = _expected_ata(OWNER, TOKEN_2022, MINT_330)
+    client = MagicMock()
+    client.get_account_info.side_effect = lambda key: SimpleNamespace(
+        value=SimpleNamespace(owner=TOKEN_2022)
+    )
+    client.get_token_account_balance.return_value = SimpleNamespace(
+        value=SimpleNamespace(amount="17231344591", decimals=6)
+    )
+
+    with patch.object(sell_script, "solana_client", client):
+        assert sell_script.get_wallet_token_balance(OWNER, MINT_330) == (17231344591, 6)
+
+    client.get_token_account_balance.assert_called_once_with(ata)
+    client.get_token_accounts_by_owner_json_parsed.assert_not_called()
+
+
+def test_wallet_balance_missing_ata_is_zero():
+    client = MagicMock()
+    client.get_account_info.side_effect = [
+        SimpleNamespace(value=SimpleNamespace(owner=TOKEN_2022)),
+        SimpleNamespace(value=None),
+    ]
+    with patch.object(sell_script, "solana_client", client):
+        assert sell_script.get_wallet_token_balance(OWNER, MINT_330) == (0, None)
+
+
+def test_wallet_balance_missing_mint_raises():
+    client = MagicMock()
+    client.get_account_info.return_value = SimpleNamespace(value=None)
+    with patch.object(sell_script, "solana_client", client):
+        with pytest.raises(ValueError):
+            sell_script.get_wallet_token_balance(OWNER, MINT_330)
+
+
 # --- Sell loop (scheduler job) --------------------------------------------
 
 class _FakeVersionedTx:

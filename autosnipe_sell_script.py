@@ -13,7 +13,6 @@ from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client
 from shyft_pricing import get_token_price
 from yellowstone_pricing import YellowstonePricingError, get_yellowstone_price, is_yellowstone_enabled
-from solana.rpc.types import TokenAccountOpts
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
 from autosnipe_sell_logic import evaluate_autosnipe_sell
@@ -98,17 +97,27 @@ def get_sniper_sell_price(token_address: str) -> dict:
     return get_token_price(token_address)
 
 
+ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+
+
 def get_wallet_token_balance(owner: Pubkey, mint: str) -> tuple[int, int | None]:
-    """Raw amount and decimals the wallet actually holds for mint (all its token accounts, any token program)."""
-    resp = solana_client.get_token_accounts_by_owner_json_parsed(
-        owner, TokenAccountOpts(mint=Pubkey.from_string(mint))
+    """
+    Raw amount and decimals held in the wallet's associated token account for mint.
+
+    Uses plain account reads only: getTokenAccountsByOwner needs secondary
+    indexes, and the local validator excludes Token-2022 from them.
+    """
+    mint_pk = Pubkey.from_string(mint)
+    mint_account = solana_client.get_account_info(mint_pk).value
+    if mint_account is None:
+        raise ValueError(f"mint account {mint} not found")
+    ata, _ = Pubkey.find_program_address(
+        [bytes(owner), bytes(mint_account.owner), bytes(mint_pk)], ASSOCIATED_TOKEN_PROGRAM_ID
     )
-    raw, decimals = 0, None
-    for acc in resp.value:
-        token_amount = acc.account.data.parsed["info"]["tokenAmount"]
-        raw += int(token_amount["amount"])
-        decimals = token_amount["decimals"]
-    return raw, decimals
+    if solana_client.get_account_info(ata).value is None:
+        return 0, None
+    balance = solana_client.get_token_account_balance(ata).value
+    return int(balance.amount), balance.decimals
 
 
 def auto_snipe_auto_sell_schedular(app):
