@@ -511,7 +511,11 @@ class ShyftPricingService:
         Locate the PumpSwap pool where `mint` is the base token, via
         getProgramAccounts + memcmp on base_mint. Pump.fun migrations always
         create the pool with the project's token as base and WSOL as quote.
+        A pool's address never changes once created, so hits are cached.
         """
+        cache = self.__dict__.setdefault("_pumpswap_pool_cache", {})
+        if mint in cache:
+            return cache[mint]
         result = self._rpc(
             "getProgramAccounts",
             [
@@ -527,7 +531,8 @@ class ShyftPricingService:
         )
         if not result:
             return None
-        return result[0]["pubkey"]
+        cache[mint] = result[0]["pubkey"]
+        return cache[mint]
 
     def get_pumpswap_pool_price(self, mint: str) -> dict[str, Any]:
         """
