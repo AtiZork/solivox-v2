@@ -219,6 +219,9 @@ class Trade(db.Model):
     sell_at_2500 = db.Column(db.Float, default=10)
     sell_at_4000 = db.Column(db.Float, default=10)
     sell_at_10000 = db.Column(db.Float, default=10)
+    # Highest take-profit tier (price multiplier, e.g. 2.0 = 100% profit)
+    # already sold for this trade; 0 = none yet.
+    last_tp_tier = db.Column(db.Float, nullable=False, default=0)
 
 
     def __repr__(self):

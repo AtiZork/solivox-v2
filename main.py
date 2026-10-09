@@ -56,6 +56,7 @@ with app.app_context():
                 ("drop_after_100_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("drop_after_400_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("sell_at_100", "DOUBLE PRECISION DEFAULT 10"),
+                ("last_tp_tier", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
             ],
         }
         try:

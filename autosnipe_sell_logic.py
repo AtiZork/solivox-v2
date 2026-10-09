@@ -2,6 +2,32 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Optional
+
+# (price multiplier threshold, Trade attribute holding the % to sell, label),
+# highest first. N% profit == price at (1 + N/100)x the buy price.
+TAKE_PROFIT_TIERS = (
+    (101.0, "sell_at_10000", "10000%"),
+    (41.0, "sell_at_4000", "4000%"),
+    (26.0, "sell_at_2500", "2500%"),
+    (16.0, "sell_at_1500", "1500%"),
+    (11.0, "sell_at_1000", "1000%"),
+    (5.0, "sell_at_400", "400%"),
+    (3.0, "sell_at_200", "200%"),
+    (2.0, "sell_at_100", "100%"),
+)
+
+
+@dataclass
+class SellDecision:
+    amount: float = 0
+    message: Optional[str] = None
+    # Multiplier threshold of the take-profit tier this sell fills; the caller
+    # persists it (Trade.last_tp_tier) after a successful send so the same
+    # tier is not sold again on the next cycle.
+    take_profit_tier: Optional[float] = None
+
 
 def sniper_flag_enabled(trade_data, attr_name: str) -> bool:
     """Enable flags default to True so older trades keep existing sell behavior."""
@@ -17,13 +43,18 @@ def evaluate_autosnipe_sell_amount(trade_data, current_price, price_tracking_map
 
     Returns (amount_to_trade, message). amount_to_trade 0 means skip.
     """
+    decision = evaluate_autosnipe_sell(trade_data, current_price, price_tracking_map)
+    return decision.amount, decision.message
+
+
+def evaluate_autosnipe_sell(trade_data, current_price, price_tracking_map=None) -> SellDecision:
     if price_tracking_map is None:
         price_tracking_map = {}
 
     amount = trade_data.purchased_token_amount or 0
     initial_price = trade_data.initial_price or 0
     if initial_price <= 0 or amount <= 0 or not current_price:
-        return 0, None
+        return SellDecision()
 
     profit_multiplier = current_price / initial_price
     drop_cutoff_on = sniper_flag_enabled(trade_data, "drop_cutoff_enabled")
@@ -32,10 +63,12 @@ def evaluate_autosnipe_sell_amount(trade_data, current_price, price_tracking_map
 
     # FIELD_3: sell if drop from buy price
     if drop_cutoff_on and current_price < initial_price * ((100 - trade_data.drop_cutoff) / 100):
-        return amount, f"Auto-Sell All: Drops below {trade_data.drop_cutoff}%"
+        return SellDecision(amount, f"Auto-Sell All: Drops below {trade_data.drop_cutoff}%")
 
-    if profit_multiplier * 100 >= trade_data.drop_until_profit:
-        return 0, f"Profit reached limit of {trade_data.drop_until_profit}%, skipping further sells."
+    # drop_until_profit is intentionally not a gate here. It used to return
+    # "skip" whenever profit_multiplier * 100 >= drop_until_profit; with the
+    # default of 99 that meant any price >= 0.99x the buy price, so every
+    # take-profit and trailing-stop rule below was unreachable.
 
     if profit_multiplier >= 2.0:
         peak_price = price_tracking_map.get(trade_data.id, current_price)
@@ -44,7 +77,7 @@ def evaluate_autosnipe_sell_amount(trade_data, current_price, price_tracking_map
 
         # FIELD_1: after 100% profit, sell if drops
         if drop_after_100_on and drop_percent >= trade_data.drop_after_100:
-            return amount, f"Auto-Sell All after 100% profit, dropped {drop_percent:.2f}%"
+            return SellDecision(amount, f"Auto-Sell All after 100% profit, dropped {drop_percent:.2f}%")
 
         # FIELD_2: after 400% profit, sell if drops
         if (
@@ -52,38 +85,19 @@ def evaluate_autosnipe_sell_amount(trade_data, current_price, price_tracking_map
             and profit_multiplier >= 5.0
             and drop_percent >= trade_data.drop_after_400
         ):
-            return amount, f"Auto-Sell All after 400% profit, dropped {drop_percent:.2f}%"
+            return SellDecision(amount, f"Auto-Sell All after 400% profit, dropped {drop_percent:.2f}%")
 
-    # Profit-target partial sells (highest threshold first).
-    # 100% profit => 2x price; 200% uses existing <=3.0 check; 400% => 5x.
-    def _partial(pct, label):
-        pct = pct or 0
-        if pct <= 0:
-            return None
-        return amount * (pct / 100), f"Auto-Sell {pct}% at {label} Profit"
-
-    sell_at_100 = getattr(trade_data, "sell_at_100", 10)
-    for threshold, pct, label in (
-        (101.0, trade_data.sell_at_10000, "10000%"),
-        (41.0, trade_data.sell_at_4000, "4000%"),
-        (26.0, trade_data.sell_at_2500, "2500%"),
-        (16.0, trade_data.sell_at_1500, "1500%"),
-        (11.0, trade_data.sell_at_1000, "1000%"),
-        (5.0, trade_data.sell_at_400, "400%"),
-        (2.0, sell_at_100, "100%"),
-    ):
-        if profit_multiplier >= threshold:
-            result = _partial(pct, label)
-            if result is not None:
-                return result
-            # pct is 0 for this tier — keep checking lower tiers
+    # Take-profit partial sells: highest reached tier first, each tier at most
+    # once. A tier at or below the last one already sold is skipped, otherwise
+    # the same tier would re-sell pct% of the remaining holdings every cycle.
+    last_tier = getattr(trade_data, "last_tp_tier", 0) or 0
+    for threshold, attr, label in TAKE_PROFIT_TIERS:
+        if profit_multiplier < threshold or threshold <= last_tier:
             continue
+        default = 10 if attr == "sell_at_100" else 0
+        pct = getattr(trade_data, attr, default) or 0
+        if pct <= 0:
+            continue
+        return SellDecision(amount * (pct / 100), f"Auto-Sell {pct}% at {label} Profit", threshold)
 
-    # Only applies while actually in profit (multiplier > 1.0) — without this
-    # floor, a trade sitting at a loss (e.g. multiplier 0.93) would match
-    # this unconditionally and sell labeled "at 200% Profit" while underwater.
-    if 1.0 < profit_multiplier <= 3.0:
-        result = _partial(trade_data.sell_at_200, "200%")
-        if result is not None:
-            return result
-    return 0, None
+    return SellDecision()

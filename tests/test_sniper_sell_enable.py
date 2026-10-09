@@ -133,13 +133,18 @@ def test_sell_at_400_still_preferred_over_sell_at_100():
     assert "at 400% Profit" in message
 
 
-def test_sell_at_200_unchanged_below_100_percent_profit():
+def test_sell_at_200_waits_for_200_percent_profit():
+    """sell_at_200 is the "At 200% profit, sell %" field: it fires at 3x, not below."""
     trade = _trade(
         drop_cutoff_enabled=False,
         sell_at_100=25,
         sell_at_200=30,
     )
     amount, message = evaluate_autosnipe_sell_amount(trade, current_price=1.5)
+    assert amount == 0
+    assert message is None
+
+    amount, message = evaluate_autosnipe_sell_amount(trade, current_price=3.0)
     assert amount == 300.0
     assert "at 200% Profit" in message
 

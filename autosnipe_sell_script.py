@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from models import db, Wallet, Trade, TradeLog, TradeHistory
 import requests
 import base64
-from flask import jsonify, Blueprint
+from flask import Blueprint
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client
@@ -16,7 +16,7 @@ from yellowstone_pricing import YellowstonePricingError, get_yellowstone_price, 
 from utils import get_token_metadata
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
-from autosnipe_sell_logic import evaluate_autosnipe_sell_amount
+from autosnipe_sell_logic import evaluate_autosnipe_sell
 
 log_messages = []
 
@@ -126,23 +126,28 @@ def auto_snipe_auto_sell_schedular(app):
                         logger.warning(f"Invalid initial price for trade {trade_data.id}. Skipping auto-snipe.")
                         continue
 
-                    amount_to_trade, message = evaluate_autosnipe_sell_amount(
-                        trade_data, current_price, price_tracking
-                    )
-                    if message and amount_to_trade <= 0 and "skipping further sells" in message:
-                        logger.info(message)
-                        continue
+                    decision = evaluate_autosnipe_sell(trade_data, current_price, price_tracking)
+                    amount_to_trade, message = decision.amount, decision.message
                     if amount_to_trade <= 0:
                         continue
+                    trade_ref = f"trade {trade_data.id} ({trade_data.token_address})"
+                    logger.info(
+                        f"[Sell decision] {trade_ref}: {message} | "
+                        f"price={current_price} x{current_price / initial_price:.3f} amount={amount_to_trade}"
+                    )
                     try:
                         # Continue with the same logic for performing the trade
                         wallet = Wallet.query.filter_by(public_key=trade_data.to_pubkey).first()
                         if not wallet:
-                            logger.warning(f"Wallet not found for {trade_data.to_pubkey}, skipping trade.")
+                            logger.warning(f"Wallet not found for {trade_data.to_pubkey}, skipping {trade_ref}.")
                             continue
                         private_key_path = wallet.private_key
                         if not os.path.exists(private_key_path):
-                            return jsonify({"status": "failed", "message": "Failed to fetch private key"}), 400
+                            # Must not `return` here: this runs inside the scheduler
+                            # loop, so returning silently aborted the whole cycle and
+                            # every older trade after this one was never evaluated.
+                            logger.error(f"Private key file missing for wallet {wallet.public_key}, skipping {trade_ref}.")
+                            continue
 
                         with open(private_key_path, 'rb') as key_file:
                             private_key_bytes = key_file.read()
@@ -183,7 +188,7 @@ def auto_snipe_auto_sell_schedular(app):
                         quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
                         quote_response = requests.get(quote_endpoint, params=quote_params, headers=headers, timeout=15)
                         if quote_response.status_code != 200:
-                            logger.error(f"Error fetching quote: {quote_response.json()}")
+                            logger.error(f"Error fetching quote for {trade_ref}: {quote_response.json()}")
                             continue
 
                         quote_data = quote_response.json()
@@ -199,7 +204,7 @@ def auto_snipe_auto_sell_schedular(app):
                         swap_endpoint = f"{API_BASE_URL}/swap/v1/swap"
                         swap_response = requests.post(swap_endpoint, json=swap_request, headers=headers, timeout=15)
                         if swap_response.status_code != 200:
-                            logger.error(f"Error performing swap: {swap_response.json()}")
+                            logger.error(f"Error performing swap for {trade_ref}: {swap_response.json()}")
                             continue
 
                         swap_data = swap_response.json()
@@ -234,12 +239,14 @@ def auto_snipe_auto_sell_schedular(app):
                             trade_data.purchased_token_amount -= amount_to_trade
                             if trade_data.purchased_token_amount <= 0:
                                 trade_data.executed = True
+                            if decision.take_profit_tier is not None:
+                                trade_data.last_tp_tier = decision.take_profit_tier
                             db.session.commit()
                         except Exception as e:
-                            logger.error(f"Error sending transaction: {str(e)}")
+                            logger.error(f"Error sending transaction for {trade_ref}: {str(e)}")
 
                     except Exception as e:
-                        logger.error(f"Auto-snipe sell error: {str(e)}")
+                        logger.error(f"Auto-snipe sell error for {trade_ref}: {str(e)}")
                         db.session.rollback()
                 print("autosnipe token sell successfully executed")
                 return None
