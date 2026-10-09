@@ -173,7 +173,7 @@ def harness(tmp_path):
     key_file.write_bytes(bytes(keypair))
     _FakeVersionedTx.wallet_pubkey = keypair.pubkey()
 
-    h = SimpleNamespace(trades=[], prices={}, jobs=[], quote_status={}, send_error=None)
+    h = SimpleNamespace(trades=[], prices={}, jobs=[], quote_status={}, send_error=None, balances={})
 
     class _Scheduler:
         def __init__(self, *a, **k):
@@ -222,8 +222,15 @@ def harness(tmp_path):
             raise price
         return {"usdPrice": price}
 
+    def _balance(owner, mint):
+        balance = h.balances.get(mint, 10**12)
+        if isinstance(balance, Exception):
+            raise balance
+        return balance, 6
+
     h.history = MagicMock()
     h.logger = MagicMock()
+    h.requests = requests_mock
     sell_script.price_tracking.clear()
 
     with patch.object(sell_script, "BackgroundScheduler", _Scheduler), \
@@ -235,7 +242,7 @@ def harness(tmp_path):
          patch.object(sell_script, "requests", requests_mock), \
          patch.object(sell_script, "solana_client", solana_mock), \
          patch.object(sell_script, "VersionedTransaction", _FakeVersionedTx), \
-         patch.object(sell_script, "get_token_metadata", return_value=None), \
+         patch.object(sell_script, "get_wallet_token_balance", side_effect=_balance), \
          patch.object(sell_script, "get_sniper_sell_price", side_effect=_price), \
          patch.object(sell_script, "logger", h.logger):
         sell_script.auto_snipe_auto_sell_schedular(Flask("test"))
@@ -245,6 +252,64 @@ def harness(tmp_path):
 
 def _logged(h, level):
     return " ".join(str(c.args[0]) for c in getattr(h.logger, level).call_args_list)
+
+
+def _quoted_amounts(h):
+    return [c.kwargs["params"]["amount"] for c in h.requests.get.call_args_list]
+
+
+def test_loop_full_exit_sells_actual_balance_when_less_than_stored(harness):
+    """Live case: stored amount is the buy quote estimate; wallet holds ~4% less."""
+    sl = _live_config_trade(id=3, token_address="MintSL", purchased_token_amount=18038.94341)
+    harness.trades = [sl]
+    harness.prices = {"MintSL": 0.5}
+    harness.balances = {"MintSL": 17231344591}  # trade 330's real on-chain raw balance
+
+    harness.run_cycle()
+
+    assert _quoted_amounts(harness) == [17231344591]
+    assert sl.executed is True
+    assert sl.purchased_token_amount == 0
+    assert harness.history.call_args.kwargs["amount"] == pytest.approx(17231.344591)
+
+
+def test_loop_partial_take_profit_uses_requested_amount_when_covered(harness):
+    tp = _live_config_trade(id=2, token_address="MintTP", purchased_token_amount=1000.0)
+    harness.trades = [tp]
+    harness.prices = {"MintTP": 2.33}
+    harness.balances = {"MintTP": 950_000_000}
+
+    harness.run_cycle()
+
+    assert _quoted_amounts(harness) == [100_000_000]
+    assert tp.purchased_token_amount == pytest.approx(900.0)
+    assert tp.last_tp_tier == 2.0
+
+
+def test_loop_zero_wallet_balance_skips_without_quoting(harness):
+    sl = _live_config_trade(id=3, token_address="MintGone")
+    harness.trades = [sl]
+    harness.prices = {"MintGone": 0.5}
+    harness.balances = {"MintGone": 0}
+
+    harness.run_cycle()
+
+    assert _quoted_amounts(harness) == []
+    assert sl.executed is False
+    assert "Wallet holds 0 tokens for trade 3 (MintGone)" in _logged(harness, "warning")
+
+
+def test_loop_balance_read_failure_skips_trade(harness):
+    sl = _live_config_trade(id=3, token_address="MintSL")
+    harness.trades = [sl]
+    harness.prices = {"MintSL": 0.5}
+    harness.balances = {"MintSL": RuntimeError("RPC timeout")}
+
+    harness.run_cycle()
+
+    assert _quoted_amounts(harness) == []
+    assert sl.executed is False
+    assert "Could not read wallet token balance for trade 3 (MintSL)" in _logged(harness, "warning")
 
 
 def test_loop_take_profit_and_stop_loss_in_same_cycle(harness):

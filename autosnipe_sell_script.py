@@ -13,7 +13,7 @@ from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client
 from shyft_pricing import get_token_price
 from yellowstone_pricing import YellowstonePricingError, get_yellowstone_price, is_yellowstone_enabled
-from utils import get_token_metadata
+from solana.rpc.types import TokenAccountOpts
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
 from autosnipe_sell_logic import evaluate_autosnipe_sell
@@ -98,6 +98,19 @@ def get_sniper_sell_price(token_address: str) -> dict:
     return get_token_price(token_address)
 
 
+def get_wallet_token_balance(owner: Pubkey, mint: str) -> tuple[int, int | None]:
+    """Raw amount and decimals the wallet actually holds for mint (all its token accounts, any token program)."""
+    resp = solana_client.get_token_accounts_by_owner_json_parsed(
+        owner, TokenAccountOpts(mint=Pubkey.from_string(mint))
+    )
+    raw, decimals = 0, None
+    for acc in resp.value:
+        token_amount = acc.account.data.parsed["info"]["tokenAmount"]
+        raw += int(token_amount["amount"])
+        decimals = token_amount["decimals"]
+    return raw, decimals
+
+
 def auto_snipe_auto_sell_schedular(app):
     scheduler = BackgroundScheduler(daemon=True)
     # Auto-snipe logic to sell tokens based on configurable conditions
@@ -161,22 +174,29 @@ def auto_snipe_auto_sell_schedular(app):
                             )
                             continue
 
-                        # Jupiter's token-metadata endpoint (unlike its swap/quote
-                        # engine) lags on brand-new tokens and 404s for them — fall
-                        # back to 6, the standard decimals for every Pump.fun/SPL
-                        # token this bot trades, not 0. A decimals=0 fallback here
-                        # previously shrank amount_in_lamports by 10^6x (e.g. 32918
-                        # tokens -> 32918 raw units instead of 32918322876), which
-                        # Jupiter's quote endpoint then rejected as NO_ROUTES_FOUND
-                        # for being a dust-sized trade.
-                        metadata = get_token_metadata(trade_data.token_address)
-                        if metadata and metadata.get("decimals") is not None:
-                            decimals = metadata.get("decimals")
-                            print(f"Token has {decimals} decimals")
-                        else:
-                            decimals = 6
+                        try:
+                            raw_balance, decimals = get_wallet_token_balance(
+                                wallet_keypair.pubkey(), trade_data.token_address
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not read wallet token balance for {trade_ref}: {e}")
+                            continue
+                        if raw_balance <= 0:
+                            logger.warning(
+                                f"Wallet holds 0 tokens for {trade_ref} "
+                                f"(DB still shows {trade_data.purchased_token_amount}); skipping sell."
+                            )
+                            continue
 
-                        amount_in_lamports = int(amount_to_trade * (10 ** decimals))
+                        # purchased_token_amount is the buy quote's estimate, not what
+                        # actually arrived (usually a few % less). Selling the stored
+                        # amount on a full exit made Jupiter fail with InsufficientFunds
+                        # (0x1788) on every cycle, so full exits sell the real balance
+                        # and partial sells are capped by it.
+                        full_exit = amount_to_trade >= trade_data.purchased_token_amount
+                        requested_raw = int(amount_to_trade * (10 ** decimals))
+                        amount_in_lamports = raw_balance if full_exit else min(requested_raw, raw_balance)
+                        sold_tokens = amount_in_lamports / (10 ** decimals)
 
                         quote_params = {
                             "inputMint": trade_data.token_address,
@@ -230,13 +250,16 @@ def auto_snipe_auto_sell_schedular(app):
                                 token_address=trade_data.token_address,
                                 trade_type="SELL",
                                 trade_kind="AutoSnipe",
-                                amount=amount_to_trade,
+                                amount=sold_tokens,
                                 execution_price=current_price if current_price else 0,
                                 tx_id=signature
                             )
                             db.session.add(executed_trade)
                             db.session.commit()
-                            trade_data.purchased_token_amount -= amount_to_trade
+                            if full_exit:
+                                trade_data.purchased_token_amount = 0
+                            else:
+                                trade_data.purchased_token_amount -= amount_to_trade
                             if trade_data.purchased_token_amount <= 0:
                                 trade_data.executed = True
                             if decision.take_profit_tier is not None:
