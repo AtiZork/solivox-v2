@@ -2,6 +2,7 @@ import logging
 import os
 import atexit
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from models import db, Wallet, Trade, TradeLog, TradeHistory
@@ -10,7 +11,7 @@ import base64
 from flask import Blueprint
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
-from settings import solana_client
+from settings import solana_client, SNIPER_SELL_PRICE_WORKERS
 from shyft_pricing import get_token_price
 from yellowstone_pricing import YellowstonePricingError, get_yellowstone_price, is_yellowstone_enabled
 from solders.pubkey import Pubkey
@@ -93,8 +94,8 @@ def get_sniper_sell_price(token_address: str) -> dict:
                 f"Yellowstone price fetch failed for {token_address} "
                 f"({exc}); falling back to Shyft RPC snapshot."
             )
-            return get_token_price(token_address)
-    return get_token_price(token_address)
+            return get_token_price(token_address, include_token_details=False)
+    return get_token_price(token_address, include_token_details=False)
 
 
 ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
@@ -129,11 +130,29 @@ def auto_snipe_auto_sell_schedular(app):
                 """Handles the auto-snipe logic for selling tokens based on trade settings."""
                 # Fetch trades that have not been executed
                 trades = Trade.query.filter_by(executed=False, auto_snipe=True).order_by(Trade.id.desc()).all()
-                for trade_data in trades:
+
+                def _fetch_price(mint):
+                    # Own app context: the module logger's DB handler then gets
+                    # a per-thread session instead of sharing this thread's.
+                    with app.app_context():
+                        return get_sniper_sell_price(mint)
+
+                # Prices are fetched in parallel (a dead token can take the full
+                # Yellowstone timeout); each trade is evaluated and sold on this
+                # thread as soon as its price arrives, so the DB session and
+                # price_tracking stay single-threaded and no trade is processed
+                # twice in a cycle.
+                price_pool = ThreadPoolExecutor(
+                    max_workers=max(1, SNIPER_SELL_PRICE_WORKERS), thread_name_prefix="sell-price"
+                )
+                price_futures = {price_pool.submit(_fetch_price, t.token_address): t for t in trades}
+                price_pool.shutdown(wait=False)
+                for price_future in as_completed(price_futures):
+                    trade_data = price_futures[price_future]
                     # A failed/invalid Yellowstone fetch skips this trade for the
                     # current cycle rather than selling on a stale or guessed price.
                     try:
-                        current_price_ = get_sniper_sell_price(trade_data.token_address)
+                        current_price_ = price_future.result()
                         current_price = current_price_['usdPrice']
                     except YellowstonePricingError as e:
                         logger.warning(f"Yellowstone price fetch failed for trade {trade_data.id}: {e}")

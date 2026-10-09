@@ -45,7 +45,7 @@ def test_falls_back_to_shyft_when_yellowstone_disabled():
     ) as shyft_fetch:
         result = sell_script.get_sniper_sell_price(PUMP_MINT)
 
-    shyft_fetch.assert_called_once_with(PUMP_MINT)
+    shyft_fetch.assert_called_once_with(PUMP_MINT, include_token_details=False)
     yellowstone_fetch.assert_not_called()
     assert result["usdPrice"] == 4.56
 
@@ -69,7 +69,7 @@ def test_yellowstone_failure_falls_back_to_shyft():
         result = sell_script.get_sniper_sell_price(PUMP_MINT)
 
     yellowstone_fetch.assert_called_once_with(PUMP_MINT)
-    shyft_fetch.assert_called_once_with(PUMP_MINT)
+    shyft_fetch.assert_called_once_with(PUMP_MINT, include_token_details=False)
     assert result["usdPrice"] == 7.89
 
 

@@ -11,6 +11,7 @@ sold. Config values below are the real values from the client's trade table.
 from __future__ import annotations
 
 import base64
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -274,7 +275,8 @@ def harness(tmp_path):
     key_file.write_bytes(bytes(keypair))
     _FakeVersionedTx.wallet_pubkey = keypair.pubkey()
 
-    h = SimpleNamespace(trades=[], prices={}, jobs=[], quote_status={}, send_error=None, balances={})
+    h = SimpleNamespace(trades=[], prices={}, jobs=[], quote_status={}, send_error=None, balances={},
+                        wallets={}, price_delays={}, events=[])
 
     class _Scheduler:
         def __init__(self, *a, **k):
@@ -290,12 +292,14 @@ def harness(tmp_path):
     trade_model.query.filter_by.return_value.order_by.return_value.all.side_effect = (
         lambda: [t for t in h.trades if not t.executed]
     )
+    default_wallet = SimpleNamespace(public_key="WalletPubkey", private_key=str(key_file))
     wallet_model = MagicMock()
-    wallet_model.query.filter_by.return_value.first.return_value = SimpleNamespace(
-        public_key="WalletPubkey", private_key=str(key_file)
+    wallet_model.query.filter_by.side_effect = lambda **kw: SimpleNamespace(
+        first=lambda: h.wallets.get(kw.get("public_key"), default_wallet)
     )
 
     def _quote(url, params=None, **kwargs):
+        h.events.append(("quote", params["inputMint"], time.monotonic()))
         status = h.quote_status.get(params["inputMint"], 200)
         if status != 200:
             return _response(status, {"error": "No routes found", "errorCode": "NO_ROUTES_FOUND"})
@@ -318,6 +322,8 @@ def harness(tmp_path):
     solana_mock.send_transaction.side_effect = _send
 
     def _price(mint):
+        time.sleep(h.price_delays.get(mint, 0))
+        h.events.append(("priced", mint, time.monotonic()))
         price = h.prices[mint]
         if isinstance(price, Exception):
             raise price
@@ -505,17 +511,76 @@ def test_loop_price_fetch_failure_skips_only_that_trade(harness):
 
 def test_loop_missing_key_file_does_not_abort_cycle(harness, tmp_path):
     """Regression: a missing key file used to `return` out of the whole cycle."""
-    first = _live_config_trade(id=5, token_address="MintMissingKey")
+    first = _live_config_trade(id=5, token_address="MintMissingKey", to_pubkey="GoneWallet")
     second = _live_config_trade(id=4, token_address="MintTP")
     harness.trades = [first, second]
     harness.prices = {"MintMissingKey": 2.33, "MintTP": 2.33}
-
-    wallet_ok = sell_script.Wallet.query.filter_by.return_value.first.return_value
-    wallet_missing = SimpleNamespace(public_key="Gone", private_key=str(tmp_path / "missing.key"))
-    sell_script.Wallet.query.filter_by.return_value.first.side_effect = [wallet_missing, wallet_ok]
+    harness.price_delays = {"MintTP": 0.2}  # processed after the missing-key trade
+    harness.wallets["GoneWallet"] = SimpleNamespace(
+        public_key="GoneWallet", private_key=str(tmp_path / "missing.key")
+    )
 
     harness.run_cycle()
 
     assert first.purchased_token_amount == 1000.0
     assert second.last_tp_tier == 2.0
     assert "Private key file missing" in _logged(harness, "error")
+
+
+def test_loop_prices_are_fetched_in_parallel(harness):
+    harness.trades = [_live_config_trade(id=i, token_address=f"Mint{i}") for i in range(8)]
+    harness.prices = {f"Mint{i}": 1.2 for i in range(8)}  # no sell, just pricing
+    harness.price_delays = {f"Mint{i}": 0.5 for i in range(8)}
+
+    with patch.object(sell_script, "SNIPER_SELL_PRICE_WORKERS", 10):
+        start = time.monotonic()
+        harness.run_cycle()
+        elapsed = time.monotonic() - start
+
+    assert len([e for e in harness.events if e[0] == "priced"]) == 8
+    assert elapsed < 1.5  # sequential would take 8 x 0.5s = 4s
+
+
+def test_loop_fast_priced_trade_sells_before_slow_price_arrives(harness):
+    slow = _live_config_trade(id=2, token_address="MintSlowDead")
+    fast = _live_config_trade(id=3, token_address="MintFastSL")
+    harness.trades = [slow, fast]  # the slow one comes first in DB order
+    harness.prices = {"MintSlowDead": 1.1, "MintFastSL": 0.5}
+    harness.price_delays = {"MintSlowDead": 1.0}
+
+    harness.run_cycle()
+
+    fast_quote = next(t for kind, mint, t in harness.events if kind == "quote" and mint == "MintFastSL")
+    slow_priced = next(t for kind, mint, t in harness.events if kind == "priced" and mint == "MintSlowDead")
+    assert fast_quote < slow_priced
+    assert fast.executed is True
+
+
+def test_loop_single_worker_still_processes_every_trade(harness):
+    trades = [_live_config_trade(id=i, token_address=f"MintSL{i}") for i in range(5)]
+    harness.trades = trades
+    harness.prices = {f"MintSL{i}": 0.5 for i in range(5)}
+
+    with patch.object(sell_script, "SNIPER_SELL_PRICE_WORKERS", 1):
+        harness.run_cycle()
+
+    assert harness.sent == 5
+    assert all(t.executed for t in trades)
+
+
+def test_loop_many_trades_each_processed_exactly_once(harness):
+    trades = [_live_config_trade(id=i, token_address=f"Mint{i}") for i in range(40)]
+    harness.trades = trades
+    harness.prices = {f"Mint{i}": (0.5 if i % 2 else 2.2) for i in range(40)}  # SL / 100% TP
+    harness.price_delays = {f"Mint{i}": 0.01 * (i % 7) for i in range(40)}
+
+    harness.run_cycle()
+
+    assert harness.sent == 40
+    quoted = [mint for kind, mint, _ in harness.events if kind == "quote"]
+    assert sorted(quoted) == sorted(f"Mint{i}" for i in range(40))
+    for i, t in enumerate(trades):
+        if i % 2:
+            assert t.executed is True
+        else:
+            assert t.tp_pct_sold == 10 and t.purchased_token_amount == pytest.approx(900.0)

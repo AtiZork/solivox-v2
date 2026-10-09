@@ -73,6 +73,9 @@ SNIPER_RPC_MIN_INTERVAL_SEC = float(os.getenv("SNIPER_RPC_MIN_INTERVAL_SEC", "0.
 # longer-lived buy-condition-check + buy-execution callback per new token.
 SNIPER_EVENT_POOL_SIZE = int(os.getenv("SNIPER_EVENT_POOL_SIZE", "50"))
 SNIPER_DECISION_POOL_SIZE = int(os.getenv("SNIPER_DECISION_POOL_SIZE", "20"))
+# Concurrent price fetches per sniper sell cycle. Sells themselves stay
+# sequential; raise with care, Shyft RPC/gRPC rate limits apply.
+SNIPER_SELL_PRICE_WORKERS = int(os.getenv("SNIPER_SELL_PRICE_WORKERS", "10"))
 
 # How long (seconds) to keep tracking a mint's buy stream after it launched.
 # Past this, its buy-decision window has long closed, so we unsubscribe and
