@@ -49,6 +49,8 @@ def _live_config_trade(**kwargs):
         sell_at_4000=10,
         sell_at_10000=10,
         last_tp_tier=0,
+        initial_token_amount=None,
+        tp_pct_sold=0,
     )
     base.update(kwargs)
     return SimpleNamespace(**base)
@@ -66,8 +68,9 @@ def test_below_100_percent_profit_does_not_sell(price):
 def test_exactly_100_percent_profit_sells_configured_pct():
     decision = evaluate_autosnipe_sell(_live_config_trade(), 2.0, {})
     assert decision.amount == pytest.approx(100.0)  # 10% of 1000
-    assert decision.message == "Auto-Sell 10% at 100% Profit"
+    assert decision.message == "Auto-Sell 10% of position at 100% Profit (take-profit total 10%)"
     assert decision.take_profit_tier == 2.0
+    assert decision.take_profit_pct == 10
 
 
 def test_drop_until_profit_99_no_longer_blocks_take_profit():
@@ -79,22 +82,28 @@ def test_drop_until_profit_99_no_longer_blocks_take_profit():
 
 
 @pytest.mark.parametrize(
-    "name, initial, current, expected_label, expected_tier",
+    "name, initial, multiplier, expected_pct, expected_label, expected_tier",
     [
         # Real open trades priced live from the client's trade table — each was
         # returning "Profit reached limit of 99.0%, skipping further sells."
-        ("KIRKDAY #322", 4.867203759355247e-06, 4.867203759355247e-06 * 2.330, "100%", 2.0),
-        ("FortniteOG #87", 1.0775447067809357e-05, 1.0775447067809357e-05 * 3.713, "200%", 3.0),
-        ("Sicey #240", 5.527842308173664e-06, 5.527842308173664e-06 * 6.945, "400%", 5.0),
-        ("kumo #311", 7.518609214447407e-06, 7.518609214447407e-06 * 9.094, "400%", 5.0),
+        # Every tier reached sells its 10%, so a price that jumped past several
+        # tiers sells all of them at once.
+        ("KIRKDAY #322", 4.867203759355247e-06, 2.330, 10, "100%", 2.0),
+        ("FortniteOG #87", 1.0775447067809357e-05, 3.713, 20, "200%", 3.0),
+        ("Sicey #240", 5.527842308173664e-06, 6.945, 30, "400%", 5.0),
+        ("kumo #311", 7.518609214447407e-06, 9.094, 30, "400%", 5.0),
     ],
 )
-def test_real_trades_above_100_percent_now_sell(name, initial, current, expected_label, expected_tier):
+def test_real_trades_above_100_percent_now_sell(name, initial, multiplier, expected_pct, expected_label, expected_tier):
     trade = _live_config_trade(initial_price=initial, purchased_token_amount=20000.0)
-    decision = evaluate_autosnipe_sell(trade, current, {})
-    assert decision.amount == pytest.approx(2000.0), name
-    assert decision.message == f"Auto-Sell 10% at {expected_label} Profit", name
+    decision = evaluate_autosnipe_sell(trade, initial * multiplier, {})
+    assert decision.amount == pytest.approx(20000.0 * expected_pct / 100), name
+    assert decision.message == (
+        f"Auto-Sell {expected_pct}% of position at {expected_label} Profit "
+        f"(take-profit total {expected_pct}%)"
+    ), name
     assert decision.take_profit_tier == expected_tier, name
+    assert decision.take_profit_pct == expected_pct, name
 
 
 def test_stop_loss_unchanged_with_live_config():
@@ -111,29 +120,72 @@ def test_small_loss_above_stop_loss_does_not_sell(price):
 
 
 def test_tier_already_sold_is_not_sold_again():
-    trade = _live_config_trade(last_tp_tier=2.0)
+    trade = _live_config_trade(last_tp_tier=2.0, tp_pct_sold=10, initial_token_amount=1000.0,
+                               purchased_token_amount=900.0)
     decision = evaluate_autosnipe_sell(trade, 2.4, {})
     assert decision.amount == 0
 
 
-def test_next_tier_still_fires_after_lower_tier_sold():
-    trade = _live_config_trade(last_tp_tier=2.0)
+def test_next_tier_sells_its_share_of_original_position():
+    trade = _live_config_trade(last_tp_tier=2.0, tp_pct_sold=10, initial_token_amount=1000.0,
+                               purchased_token_amount=900.0)
     decision = evaluate_autosnipe_sell(trade, 3.2, {})
-    assert decision.message == "Auto-Sell 10% at 200% Profit"
+    assert decision.amount == pytest.approx(100.0)  # 10% of the original 1000, not of 900
     assert decision.take_profit_tier == 3.0
+    assert decision.take_profit_pct == 20
 
 
 def test_lower_tier_not_resold_after_price_falls_back():
-    trade = _live_config_trade(last_tp_tier=5.0)
+    trade = _live_config_trade(last_tp_tier=5.0, tp_pct_sold=30, initial_token_amount=1000.0,
+                               purchased_token_amount=700.0)
     decision = evaluate_autosnipe_sell(trade, 2.5, {1: 2.6})
     assert decision.amount == 0
 
 
-def test_zero_pct_tier_falls_through_to_next_lower_tier():
-    trade = _live_config_trade(sell_at_400=0)
+def test_kumo_live_state_sells_its_missed_100_and_200_percent_tiers():
+    # kumo sold only the 400% tier (10% of 30188.0010) under the previous deploy.
+    trade = _live_config_trade(last_tp_tier=5.0, tp_pct_sold=10, initial_token_amount=30188.0010,
+                               purchased_token_amount=27169.2008838)
+    decision = evaluate_autosnipe_sell(trade, 7.5, {})
+    assert decision.amount == pytest.approx(30188.0010 * 0.20)
+    assert decision.take_profit_pct == 30
+
+
+def test_clients_example_tiers_add_up_until_everything_is_sold():
+    """At 100% sell 10, at 200% 10 more, at 400% 20 more, ... until all sold."""
+    trade = _live_config_trade(sell_at_100=10, sell_at_200=10, sell_at_400=20, sell_at_1000=25,
+                               sell_at_1500=35, initial_token_amount=1000.0)
+    expected = [(2.1, 100.0, 10), (3.1, 100.0, 20), (5.2, 200.0, 40), (11.5, 250.0, 65), (16.5, 350.0, 100)]
+    for price, amount, cumulative in expected:
+        decision = evaluate_autosnipe_sell(trade, price, {})
+        assert decision.amount == pytest.approx(amount), price
+        assert decision.take_profit_pct == cumulative, price
+        trade.purchased_token_amount -= decision.amount
+        trade.tp_pct_sold = decision.take_profit_pct
+        trade.last_tp_tier = decision.take_profit_tier
+    assert trade.purchased_token_amount == pytest.approx(0)
+
+
+def test_take_profit_never_sells_more_than_remaining():
+    trade = _live_config_trade(sell_at_100=60, sell_at_200=60, initial_token_amount=1000.0,
+                               tp_pct_sold=60, last_tp_tier=2.0, purchased_token_amount=400.0)
+    decision = evaluate_autosnipe_sell(trade, 3.1, {})
+    assert decision.amount == pytest.approx(400.0)
+    assert decision.take_profit_pct == 100
+
+
+def test_zero_pct_tier_is_skipped():
+    trade = _live_config_trade(sell_at_200=0)
     decision = evaluate_autosnipe_sell(trade, 5.5, {})
-    assert decision.message == "Auto-Sell 10% at 200% Profit"
-    assert decision.take_profit_tier == 3.0
+    assert decision.amount == pytest.approx(200.0)  # 100% tier + 400% tier
+    assert decision.take_profit_tier == 5.0
+    assert decision.take_profit_pct == 20
+
+
+def test_missing_initial_amount_falls_back_to_remaining():
+    trade = _live_config_trade(initial_token_amount=None, purchased_token_amount=500.0)
+    decision = evaluate_autosnipe_sell(trade, 2.0, {})
+    assert decision.amount == pytest.approx(50.0)
 
 
 def test_trailing_stop_after_100_percent_reachable_with_live_config():
@@ -372,6 +424,8 @@ def test_loop_take_profit_and_stop_loss_in_same_cycle(harness):
     assert harness.sent == 2
     assert tp.purchased_token_amount == pytest.approx(900.0)
     assert tp.last_tp_tier == 2.0
+    assert tp.tp_pct_sold == 10
+    assert tp.initial_token_amount == 1000.0  # captured before the first take-profit sale
     assert tp.executed is False
     assert sl.purchased_token_amount == 0
     assert sl.executed is True
@@ -388,6 +442,19 @@ def test_loop_does_not_resell_same_tier_next_cycle(harness):
 
     assert harness.sent == 1
     assert tp.purchased_token_amount == pytest.approx(900.0)
+
+
+def test_loop_price_climbing_through_tiers_sells_each_once(harness):
+    tp = _live_config_trade(id=2, token_address="MintTP", initial_token_amount=1000.0)
+    harness.trades = [tp]
+    for price in (2.1, 2.2, 3.5, 3.6, 7.5, 7.0):
+        harness.prices = {"MintTP": price}
+        harness.run_cycle()
+
+    assert _quoted_amounts(harness) == [100_000_000, 100_000_000, 100_000_000]
+    assert tp.purchased_token_amount == pytest.approx(700.0)
+    assert tp.tp_pct_sold == 30
+    assert tp.last_tp_tier == 5.0
 
 
 def test_loop_jupiter_quote_failure_keeps_trade_retryable(harness):

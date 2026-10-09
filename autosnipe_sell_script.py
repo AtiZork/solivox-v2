@@ -265,14 +265,17 @@ def auto_snipe_auto_sell_schedular(app):
                             )
                             db.session.add(executed_trade)
                             db.session.commit()
+                            if decision.take_profit_pct is not None:
+                                if trade_data.initial_token_amount is None:
+                                    trade_data.initial_token_amount = trade_data.purchased_token_amount
+                                trade_data.tp_pct_sold = decision.take_profit_pct
+                                trade_data.last_tp_tier = decision.take_profit_tier
                             if full_exit:
                                 trade_data.purchased_token_amount = 0
                             else:
                                 trade_data.purchased_token_amount -= amount_to_trade
                             if trade_data.purchased_token_amount <= 0:
                                 trade_data.executed = True
-                            if decision.take_profit_tier is not None:
-                                trade_data.last_tp_tier = decision.take_profit_tier
                             db.session.commit()
                         except Exception as e:
                             logger.error(f"Error sending transaction for {trade_ref}: {str(e)}")

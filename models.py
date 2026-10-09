@@ -222,6 +222,10 @@ class Trade(db.Model):
     # Highest take-profit tier (price multiplier, e.g. 2.0 = 100% profit)
     # already sold for this trade; 0 = none yet.
     last_tp_tier = db.Column(db.Float, nullable=False, default=0)
+    # Token amount at buy time; take-profit tier % are shares of this.
+    initial_token_amount = db.Column(db.Float, nullable=True)
+    # Cumulative % of initial_token_amount already sold by take-profit tiers.
+    tp_pct_sold = db.Column(db.Float, nullable=False, default=0)
 
 
     def __repr__(self):

@@ -121,7 +121,8 @@ def test_sell_at_100_triggers_at_100_percent_profit():
     assert "at 100% Profit" in message
 
 
-def test_sell_at_400_still_preferred_over_sell_at_100():
+def test_jump_to_400_percent_sells_every_reached_tier():
+    """Every tier reached sells its share once: 100% tier (25) + 400% tier (40)."""
     trade = _trade(
         drop_after_100_enabled=False,
         drop_after_400_enabled=False,
@@ -129,7 +130,7 @@ def test_sell_at_400_still_preferred_over_sell_at_100():
         sell_at_400=40,
     )
     amount, message = evaluate_autosnipe_sell_amount(trade, current_price=5.0)
-    assert amount == 400.0
+    assert amount == 650.0
     assert "at 400% Profit" in message
 
 
@@ -144,8 +145,9 @@ def test_sell_at_200_waits_for_200_percent_profit():
     assert amount == 0
     assert message is None
 
+    # 100% tier (25) + 200% tier (30), both reached at 3x
     amount, message = evaluate_autosnipe_sell_amount(trade, current_price=3.0)
-    assert amount == 300.0
+    assert amount == 550.0
     assert "at 200% Profit" in message
 
 

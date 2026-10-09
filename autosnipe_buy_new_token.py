@@ -530,6 +530,7 @@ def _buy_token_internal(token_address, config):
             initial_price=current_token_price,
             amount=amount, # Amount of SOL spent
             purchased_token_amount=estimated_tokens,
+            initial_token_amount=estimated_tokens,
             trade_type="BUY",
             to_pubkey=to_pubkey,
 

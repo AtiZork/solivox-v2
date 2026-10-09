@@ -5,17 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-# (price multiplier threshold, Trade attribute holding the % to sell, label),
-# highest first. N% profit == price at (1 + N/100)x the buy price.
+# (price multiplier threshold, Trade attribute holding the % to sell, label).
+# N% profit == price at (1 + N/100)x the buy price. Each tier's % is a share of
+# the original position, so the tiers add up as the price climbs.
 TAKE_PROFIT_TIERS = (
-    (101.0, "sell_at_10000", "10000%"),
-    (41.0, "sell_at_4000", "4000%"),
-    (26.0, "sell_at_2500", "2500%"),
-    (16.0, "sell_at_1500", "1500%"),
-    (11.0, "sell_at_1000", "1000%"),
-    (5.0, "sell_at_400", "400%"),
-    (3.0, "sell_at_200", "200%"),
     (2.0, "sell_at_100", "100%"),
+    (3.0, "sell_at_200", "200%"),
+    (5.0, "sell_at_400", "400%"),
+    (11.0, "sell_at_1000", "1000%"),
+    (16.0, "sell_at_1500", "1500%"),
+    (26.0, "sell_at_2500", "2500%"),
+    (41.0, "sell_at_4000", "4000%"),
+    (101.0, "sell_at_10000", "10000%"),
 )
 
 
@@ -23,10 +24,12 @@ TAKE_PROFIT_TIERS = (
 class SellDecision:
     amount: float = 0
     message: Optional[str] = None
-    # Multiplier threshold of the take-profit tier this sell fills; the caller
-    # persists it (Trade.last_tp_tier) after a successful send so the same
-    # tier is not sold again on the next cycle.
+    # Set only for take-profit sells. After a successful send the caller
+    # persists take_profit_pct as Trade.tp_pct_sold (cumulative % of the
+    # original position sold by take-profit) and take_profit_tier as
+    # Trade.last_tp_tier (highest tier reached), so no tier is sold twice.
     take_profit_tier: Optional[float] = None
+    take_profit_pct: Optional[float] = None
 
 
 def sniper_flag_enabled(trade_data, attr_name: str) -> bool:
@@ -87,17 +90,31 @@ def evaluate_autosnipe_sell(trade_data, current_price, price_tracking_map=None) 
         ):
             return SellDecision(amount, f"Auto-Sell All after 400% profit, dropped {drop_percent:.2f}%")
 
-    # Take-profit partial sells: highest reached tier first, each tier at most
-    # once. A tier at or below the last one already sold is skipped, otherwise
-    # the same tier would re-sell pct% of the remaining holdings every cycle.
-    last_tier = getattr(trade_data, "last_tp_tier", 0) or 0
+    # Take-profit: every tier reached sells its % of the original position
+    # once. Sell the gap between what all reached tiers add up to and what has
+    # already been sold, so a price that jumps past several tiers sells all of
+    # them in one go, and a tier is never sold twice.
+    reached = []
+    target_pct = 0.0
     for threshold, attr, label in TAKE_PROFIT_TIERS:
-        if profit_multiplier < threshold or threshold <= last_tier:
-            continue
+        if profit_multiplier < threshold:
+            break
         default = 10 if attr == "sell_at_100" else 0
         pct = getattr(trade_data, attr, default) or 0
-        if pct <= 0:
-            continue
-        return SellDecision(amount * (pct / 100), f"Auto-Sell {pct}% at {label} Profit", threshold)
+        if pct > 0:
+            target_pct += pct
+            reached.append((threshold, label))
+    target_pct = min(target_pct, 100.0)
+    sold_pct = getattr(trade_data, "tp_pct_sold", 0) or 0
+    if reached and target_pct > sold_pct:
+        original = getattr(trade_data, "initial_token_amount", None) or amount
+        sell_pct = target_pct - sold_pct
+        sell_amount = min(original * sell_pct / 100, amount)
+        return SellDecision(
+            sell_amount,
+            f"Auto-Sell {sell_pct:g}% of position at {reached[-1][1]} Profit (take-profit total {target_pct:g}%)",
+            reached[-1][0],
+            target_pct,
+        )
 
     return SellDecision()
