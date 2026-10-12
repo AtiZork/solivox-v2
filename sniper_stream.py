@@ -9,12 +9,9 @@ log arrives (not on a timer).
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 import logging
 import re
-import struct
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -32,7 +29,6 @@ from settings import (
     SNIPER_EVENT_POOL_SIZE,
     SNIPER_HTTP_FALLBACK,
     SNIPER_MINT_TRACKING_TTL_SEC,
-    SNIPER_REQUIRE_PUMP_SUFFIX,
     SNIPER_RPC_MIN_INTERVAL_SEC,
     SNIPER_USE_WEBSOCKET,
     get_solana_ws_urls,
@@ -77,66 +73,6 @@ def _submit_logged(pool: ThreadPoolExecutor, fn: Callable, *args) -> None:
 
 # Base58 pump.fun mint addresses end with "pump"
 _PUMP_MINT_RE = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}pump")
-
-# Anchor event discriminators: sha256("event:<Name>")[:8]
-_CREATE_EVENT = hashlib.sha256(b"event:CreateEvent").digest()[:8]
-_TRADE_EVENT = hashlib.sha256(b"event:TradeEvent").digest()[:8]
-_CREATE_INSTRUCTIONS = ("Program log: Instruction: Create", "Program log: Instruction: CreateV2")
-
-
-def _pump_program_data(logs: list) -> list[bytes]:
-    """
-    Decoded "Program data:" payloads emitted while the Pump.fun program itself
-    is executing (tracked via the invoke/success log stack), so another
-    program's event with a colliding name is never misread.
-    """
-    pump_id = PUMP_FUN_PROGRAM_ID_STR
-    stack: list[str] = []
-    out: list[bytes] = []
-    for line in logs:
-        if line.startswith("Program ") and " invoke [" in line:
-            stack.append(line.split(" ", 2)[1])
-        elif line.startswith("Program ") and (line.endswith(" success") or " failed" in line):
-            if stack:
-                stack.pop()
-        elif line.startswith("Program data: ") and stack and stack[-1] == pump_id:
-            try:
-                out.append(base64.b64decode(line[len("Program data: "):]))
-            except (ValueError, TypeError):
-                continue
-    return out
-
-
-def parse_create_mint(logs: list) -> Optional[str]:
-    """Mint of a Pump.fun launch, from its CreateEvent (name, symbol, uri, mint, ...)."""
-    for raw in _pump_program_data(logs):
-        if raw[:8] != _CREATE_EVENT:
-            continue
-        try:
-            off = 8
-            for _ in range(3):
-                (length,) = struct.unpack_from("<I", raw, off)
-                off += 4 + length
-            return str(Pubkey.from_bytes(raw[off:off + 32]))
-        except (struct.error, ValueError):
-            return None
-    return None
-
-
-def parse_trade_buys(logs: list) -> list[tuple[str, float]]:
-    """
-    (mint, SOL spent) for every Pump.fun buy in a transaction, from its
-    TradeEvent (mint, sol_amount, token_amount, is_buy, ...). Exact for every
-    transaction version and regardless of who paid the fee.
-    """
-    buys = []
-    for raw in _pump_program_data(logs):
-        if raw[:8] != _TRADE_EVENT or len(raw) < 57 or raw[56] != 1:
-            continue
-        mint = str(Pubkey.from_bytes(raw[8:40]))
-        (lamports,) = struct.unpack_from("<Q", raw, 40)
-        buys.append((mint, lamports / 1_000_000_000))
-    return buys
 
 
 @dataclass
@@ -202,10 +138,6 @@ class SniperStreamState:
     def has_tracked_mints(self) -> bool:
         with self._lock:
             return bool(self.mint_registry)
-
-    def is_tracking(self, mint: str) -> bool:
-        with self._lock:
-            return mint in self.mint_registry
 
     def get_tracked_mint_set(self) -> set[str]:
         with self._lock:
@@ -411,76 +343,28 @@ def _extract_mint_and_sol_from_buy_tx(signature: str) -> tuple[Optional[str], fl
     return mint, sol_spent
 
 
-def _register_new_launch(mint: str, signature: str) -> None:
-    """Track a launch and start its buy-condition check. Buys are counted from
-    the Pump.fun program stream (see _handle_program_logs), so no per-mint
-    subscription is needed."""
-    if SNIPER_REQUIRE_PUMP_SUFFIX and not mint.endswith("pump"):
-        return
-    if not stream_state.register_launch(mint, signature):
-        return
-    logger.info("[WS] New Pump.fun token: %s (sig %s...)", mint, signature[:16])
-    if _on_new_token:
-        _submit_logged(_decision_pool, _run_new_token_callback, mint)
-
-
 def _process_create(signature: str, logs: list) -> None:
     mint = _extract_mint_from_create(signature, logs)
     if not mint:
         logger.warning("[WS] Create detected but mint not resolved: %s", signature[:16])
         return
-    _register_new_launch(mint, signature)
 
+    if not stream_state.register_launch(mint, signature):
+        return
 
-def _is_create_tx(logs: list) -> bool:
-    # Exact match: "Instruction: CreateIdempotent" (token-account program) in
-    # ordinary buys must not count as a launch.
-    return any(line in _CREATE_INSTRUCTIONS for line in logs)
+    logger.info("[WS] New Pump.fun token: %s (sig %s...)", mint, signature[:16])
+    _request_mint_subscription(mint)
+    if _on_new_token:
+        _submit_logged(_decision_pool, _run_new_token_callback, mint)
 
 
 def _handle_create(signature: str, logs: list) -> None:
-    if not _is_create_tx(logs):
+    if not _logs_contain(logs, "Instruction: Create"):
         return
     if not stream_state.mark_signature_seen(signature):
         return
     # Resolve mint via RPC in background so the WS loop stays responsive.
     _submit_logged(_event_pool, _process_create, signature, list(logs))
-
-
-def _record_buys(signature: str, buys: list) -> None:
-    sol_usd = _get_sol_usd_price()
-    for mint, sol_amount in buys:
-        stream_state.add_buy(mint, BuyEvent(
-            signature=signature,
-            sol_amount=sol_amount,
-            usd_value=sol_amount * sol_usd,
-            timestamp=time.time(),
-        ))
-        stats = stream_state.get_buy_stats(mint, min_usd_value=0)
-        logger.info(
-            "[WS] Buy on %s: %.4f SOL (~$%.2f) | total buys=%d (sig %s...)",
-            mint[:8], sol_amount, sol_amount * sol_usd, stats["total_buys"], signature[:16],
-        )
-
-
-def _handle_program_logs(signature: str, logs: list) -> None:
-    """
-    Every Pump.fun transaction arrives here. A launch is registered at once
-    from its CreateEvent (no RPC, so its first-second buys are not missed);
-    buys of tracked launches are counted from their TradeEvent. The creator's
-    own buy inside the launch transaction is not counted.
-    """
-    mint = parse_create_mint(logs)
-    if mint:
-        if stream_state.mark_signature_seen(signature):
-            _register_new_launch(mint, signature)
-        return
-    if _is_create_tx(logs):
-        _handle_create(signature, logs)  # no CreateEvent in logs: resolve via RPC
-        return
-    buys = [(m, sol) for m, sol in parse_trade_buys(logs) if stream_state.is_tracking(m)]
-    if buys and stream_state.mark_signature_seen(signature):
-        _submit_logged(_event_pool, _record_buys, signature, buys)
 
 
 def _run_new_token_callback(mint: str) -> None:
@@ -668,14 +552,12 @@ async def _pump_fun_ws_loop() -> None:
                     logs = value.get("logs", [])
                     if not signature or not logs:
                         continue
-                    if value.get("err") is not None:
-                        continue  # reverted: its logs (incl. trade events) never took effect
 
                     stream_state.note_message()
                     if subscription in mint_sub_ids:
                         _handle_mint_buy(mint_sub_ids[subscription], signature, logs)
                     else:
-                        _handle_program_logs(signature, logs)
+                        _handle_create(signature, logs)
 
         except asyncio.CancelledError:
             break
