@@ -73,6 +73,9 @@ SNIPER_RPC_MIN_INTERVAL_SEC = float(os.getenv("SNIPER_RPC_MIN_INTERVAL_SEC", "0.
 # longer-lived buy-condition-check + buy-execution callback per new token.
 SNIPER_EVENT_POOL_SIZE = int(os.getenv("SNIPER_EVENT_POOL_SIZE", "50"))
 SNIPER_DECISION_POOL_SIZE = int(os.getenv("SNIPER_DECISION_POOL_SIZE", "20"))
+# Only snipe launches whose mint address ends in "pump" (the behaviour so far).
+# About half of Pump.fun launches use other mint addresses; set false to include them.
+SNIPER_REQUIRE_PUMP_SUFFIX = os.getenv("SNIPER_REQUIRE_PUMP_SUFFIX", "true").lower() == "true"
 # Concurrent price fetches per sniper sell cycle. Sells themselves stay
 # sequential; raise with care, Shyft RPC/gRPC rate limits apply.
 SNIPER_SELL_PRICE_WORKERS = int(os.getenv("SNIPER_SELL_PRICE_WORKERS", "10"))
