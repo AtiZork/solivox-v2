@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from flask import Flask
+from solana.rpc.commitment import Confirmed
 from solders.keypair import Keypair
 
 import autosnipe_sell_script as sell_script
@@ -214,7 +215,7 @@ def _expected_ata(owner, program, mint):
 def test_wallet_balance_reads_token_2022_ata_without_secondary_index():
     ata = _expected_ata(OWNER, TOKEN_2022, MINT_330)
     client = MagicMock()
-    client.get_account_info.side_effect = lambda key: SimpleNamespace(
+    client.get_account_info.side_effect = lambda key, **kw: SimpleNamespace(
         value=SimpleNamespace(owner=TOKEN_2022)
     )
     client.get_token_account_balance.return_value = SimpleNamespace(
@@ -224,7 +225,10 @@ def test_wallet_balance_reads_token_2022_ata_without_secondary_index():
     with patch.object(sell_script, "solana_client", client):
         assert sell_script.get_wallet_token_balance(OWNER, MINT_330) == (17231344591, 6)
 
-    client.get_token_account_balance.assert_called_once_with(ata)
+    client.get_token_account_balance.assert_called_once_with(ata, commitment=Confirmed)
+    # Every read is at confirmed: finalized lags ~30 slots, so a token bought
+    # seconds ago read as a 0 balance there.
+    assert all(c.kwargs.get("commitment") == Confirmed for c in client.get_account_info.call_args_list)
     client.get_token_accounts_by_owner_json_parsed.assert_not_called()
 
 
@@ -320,13 +324,15 @@ def harness(tmp_path):
         200, {"swapTransaction": base64.b64encode(b"tx").decode()}
     )
 
-    def _send(_tx):
+    def _send(_tx, opts=None):
+        h.send_opts.append(opts)
         if h.send_error:
             raise RuntimeError(h.send_error)
         h.sent += 1
         return SimpleNamespace(value=f"sig{h.sent}")
 
     h.sent = 0
+    h.send_opts = []
     solana_mock = MagicMock()
     solana_mock.send_transaction.side_effect = _send
 
@@ -349,6 +355,7 @@ def harness(tmp_path):
     h.requests = requests_mock
     sell_script.price_tracking.clear()
     sell_script._retry_after.clear()
+    sell_script._empty_since.clear()
 
     h.stream = MagicMock()
     h.db = MagicMock()
@@ -366,7 +373,7 @@ def harness(tmp_path):
          patch.object(sell_script, "VersionedTransaction", _FakeVersionedTx), \
          patch.object(sell_script, "get_wallet_token_balance", side_effect=_balance), \
          patch.object(sell_script, "get_sniper_sell_price", side_effect=_price), \
-         patch.object(sell_script, "logger", h.logger):
+         patch.object(sell_script, "logger", h.logger),          patch.object(sell_script, "SNIPER_SELL_EMPTY_GRACE_SEC", 0):
         sell_script.auto_snipe_auto_sell_schedular(h.app)
         h.run_cycle = h.jobs[0]
         yield h
@@ -666,7 +673,8 @@ def test_scheduler_starts_sell_stream_wired_to_instant_check(harness):
         deadline = time.monotonic() + 2
         while not check.called and time.monotonic() < deadline:
             time.sleep(0.01)
-    check.assert_called_once_with(harness.app, "MintTP")
+    check.assert_called_once()
+    assert check.call_args.args[:2] == (harness.app, "MintTP")
 
 
 def test_sell_stream_disabled_by_setting(tmp_path):
@@ -770,7 +778,7 @@ def test_activity_bursts_are_coalesced():
     calls = []
     started = __import__("threading").Event()
 
-    def slow_check(app, mint):
+    def slow_check(app, mint, requested_at=None):
         calls.append(time.monotonic())
         started.set()
         time.sleep(0.2)

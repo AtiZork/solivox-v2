@@ -7,12 +7,15 @@ import base64
 from flask import jsonify, Blueprint
 from dotenv import load_dotenv
 from requests import JSONDecodeError
+from solana.rpc.commitment import Confirmed
 from solana.rpc.core import RPCException
+from solana.rpc.types import TxOpts
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
 from settings import solana_client, SNIPER_USE_WEBSOCKET, SNIPER_HTTP_FALLBACK
 from shyft_pricing import get_token_price
 from solders.pubkey import Pubkey
+from latency_log import StageTimer
 
 log_messages = []
 
@@ -61,7 +64,29 @@ SPL_TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss62
 from threading import Lock
 
 WALLET_BUY_LOCK = Lock()
+# (user_id, mint) pairs a buy transaction was sent (or attempted) for. Checked
+# and updated under WALLET_BUY_LOCK, so the same user never buys a mint twice.
 BOUGHT_TOKENS = set()
+# Preflight against the confirmed bank: the client's default (finalized) is
+# ~30 slots behind, where a just-launched token and Jupiter's recent blockhash
+# don't exist yet, so preflight rejected buys of new tokens.
+BUY_TX_OPTS = TxOpts(preflight_commitment=Confirmed)
+
+
+def describe_send_error(exc: Exception) -> str:
+    """Readable reason for a failed send_transaction (any RPC error shape)."""
+    err = exc.args[0] if exc.args else exc
+    message = getattr(err, "message", None) or str(err)
+    data = getattr(err, "data", None)
+    detail = getattr(data, "err", None)
+    logs = getattr(data, "logs", None) or []
+    parts = [str(message)]
+    if detail is not None:
+        parts.append(f"err={detail}")
+    failing = [line for line in logs if "rror" in line or "failed" in line]
+    if failing:
+        parts.append(f"log={failing[-1]}")
+    return " | ".join(parts)
 
 
 def get_token_price_usd(token_address):
@@ -381,21 +406,33 @@ def should_buy_token(token_address, user_id, config):
     print(f"[Buy Condition][HTTP] Buy conditions NOT MET for {token_address} within scan window.")
     return False
 
-def buy_token(token_address, config):
-    with WALLET_BUY_LOCK:
-        return _buy_token_internal(token_address, config)
+def buy_token(token_address, config, decision_ms=None):
+    timer = StageTimer("buy", mint=token_address, user=getattr(config, "user_id", None))
+    if decision_ms is not None:
+        timer.add("decision", decision_ms)
+    wait_start = time.monotonic()
+    try:
+        with WALLET_BUY_LOCK:
+            timer.add("lock_wait", (time.monotonic() - wait_start) * 1000)
+            return _buy_token_internal(token_address, config, timer)
+    finally:
+        timer.finish()
 
 # def _buy_token_internal(token_address: str, user_id: int) -> bool:
-def _buy_token_internal(token_address, config):
+def _buy_token_internal(token_address, config, timer=None):
 
     global signature
+    timer = timer or StageTimer("buy", mint=token_address)
     try:
         # config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
         if not config:
             logger.error(f"[Buy Token] No active AutoSnipeConfig found for user. Cannot proceed with buy.")
+            timer.outcome = "no_config"
             return True
-        if token_address in BOUGHT_TOKENS:
+        buy_key = (config.user_id, token_address)
+        if buy_key in BOUGHT_TOKENS:
             logger.info(f"Token {token_address} already bought, skipping.")
+            timer.outcome = "duplicate_skipped"
             return False
 
         # Fetch relevant settings from the AutoSnipeConfig
@@ -407,11 +444,13 @@ def _buy_token_internal(token_address, config):
         wallet = Wallet.query.filter_by(user_id=config.user_id).first() # Assuming user_id can link to a wallet
         if not wallet:
             logger.error(f"Failed to fetch wallet for user.")
+            timer.outcome = "no_wallet"
             return True
         to_pubkey = wallet.public_key
 
         amount = buy_amount_sol # Amount in SOL to spend
-        current_token_price_data = get_token_price(token_address)
+        with timer.stage("price"):
+            current_token_price_data = get_token_price(token_address)
         current_token_price = current_token_price_data["usdPrice"]
         token_name = current_token_price_data["name"]
         token_symbol = current_token_price_data["symbol"]
@@ -419,16 +458,19 @@ def _buy_token_internal(token_address, config):
 
 
         # ✅ Check if wallet exists and balance is sufficient
-        wallet_balance_response = solana_client.get_balance(Pubkey.from_string(to_pubkey))
+        with timer.stage("balance"):
+            wallet_balance_response = solana_client.get_balance(Pubkey.from_string(to_pubkey), commitment=Confirmed)
         wallet_balance = wallet_balance_response.value / 1_000_000_000  # Convert lamports to SOL
 
         if wallet_balance < amount:
             logger.error(f"Insufficient balance. Wallet has {wallet_balance:.4f} SOL, but {amount:.4f} SOL is required.")
+            timer.outcome = "insufficient_sol"
             return True
 
         private_key_path = wallet.private_key
         if not os.path.exists(private_key_path):
             logger.error(f"Failed to fetch private key")
+            timer.outcome = "no_key"
             return True
 
         with open(private_key_path, 'rb') as key_file:
@@ -446,9 +488,11 @@ def _buy_token_internal(token_address, config):
         }
 
         quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
-        quote_response = requests.get(quote_endpoint, params=quote_params, headers=headers, timeout=15)
+        with timer.stage("quote"):
+            quote_response = requests.get(quote_endpoint, params=quote_params, headers=headers, timeout=15)
 
         if quote_response.status_code != 200:
+            timer.outcome = "quote_failed"
             try:
                 print(f"Error fetching quote: {quote_response.json()}")
                 logger.error(f"Error fetching quote")
@@ -470,9 +514,11 @@ def _buy_token_internal(token_address, config):
         }
 
         swap_endpoint = f"{API_BASE_URL}/swap/v1/swap"
-        swap_response = requests.post(swap_endpoint, json=swap_request, headers=headers, timeout=15)
+        with timer.stage("swap"):
+            swap_response = requests.post(swap_endpoint, json=swap_request, headers=headers, timeout=15)
 
         if swap_response.status_code != 200:
+            timer.outcome = "swap_failed"
             try:
                 print(f"Error performing swap: {swap_response.json()}")
                 logger.error(f"Error performing swap)")
@@ -501,23 +547,27 @@ def _buy_token_internal(token_address, config):
         # # Sign Transaction
         # signed_transaction = VersionedTransaction(raw_transaction.message, [wallet_keypair.sign_message(raw_transaction.message.serialize())])
 
-        # Send the signed transaction to the RPC client
+        # Send the signed transaction to the RPC client. Marked as bought
+        # first: a send that errors may still have landed, so it is never
+        # repeated for this user and mint (there is no automatic resubmission).
+        BOUGHT_TOKENS.add(buy_key)
         try:
             start_time = time.time()
-            rpc_response = solana_client.send_transaction(signed_transaction)
+            with timer.stage("send"):
+                rpc_response = solana_client.send_transaction(signed_transaction, opts=BUY_TX_OPTS)
             end_time = time.time()
             execution_time_ms = (end_time - start_time) * 1000
             signature = str(rpc_response.value)
+            timer.fields["sig"] = signature
             print(f"✅ Auto trade job executed in {execution_time_ms:.2f} ms!")
             print(f"Transaction sent successfully! Signature: {signature}")
             print(f"View transaction on Solscan: https://solscan.io/tx/{signature}")
 
         except RPCException as e:
-            error_message = e.args[0]
-            print("Transaction failed!")
-            print(f"Custom Program Error Code: {error_message.data.err.err.code}")
-            print(f"Message: {error_message.message}")
-            logger.error(error_message.message)
+            reason = describe_send_error(e)
+            print(f"Transaction failed! {reason}")
+            logger.error(f"Buy transaction for {token_address} rejected: {reason}")
+            timer.outcome, timer.reason = "send_rejected", reason.split(" | ")[0][:80].replace(" ", "_")
             return True
 
         # Create new Trade record with simplified fields
@@ -554,25 +604,30 @@ def _buy_token_internal(token_address, config):
             sell_at_4000=config.sell_at_4000 if config.sell_at_4000 else 10,
             sell_at_10000=config.sell_at_10000 if config.sell_at_10000 else 10,
         )
-        db.session.add(new_trade)
-        db.session.commit()
+        timer.outcome = "sent"
+        with timer.stage("db"):
+            db.session.add(new_trade)
+            db.session.commit()
 
-        # Record in TradeHistory
-        executed_trade = TradeHistory(
-            trade_id=new_trade.id,
-            token_address=token_address,
-            trade_type="BUY",
-            trade_kind="AUTOSNIPE", # Consistent with Trade table
-            amount=amount, # Amount of SOL spent
-            execution_price=current_token_price,
-            tx_id=signature
-        )
-        db.session.add(executed_trade)
-        db.session.commit()
+            # Record in TradeHistory
+            executed_trade = TradeHistory(
+                trade_id=new_trade.id,
+                token_address=token_address,
+                trade_type="BUY",
+                trade_kind="AUTOSNIPE", # Consistent with Trade table
+                amount=amount, # Amount of SOL spent
+                execution_price=current_token_price,
+                tx_id=signature
+            )
+            db.session.add(executed_trade)
+            db.session.commit()
         logger.info(f"AutoSnipe Trade against token address {token_address} run successfully")
         return True
 
     except Exception as e:
+        if timer.outcome != "sent":
+            timer.outcome = "error"
+        timer.reason = type(e).__name__
         db.session.rollback()
         print(f"An unexpected error occurred during buy_token: {str(e)}")
         # Log full traceback for debugging
@@ -589,9 +644,10 @@ def autosnipe_buy_new_token(token_address: str, config: AutoSnipeConfig) -> bool
     if not config.active:
         return False
 
+    decision_start = time.monotonic()
     if should_buy_token(token_address, config.user_id, config):
         print(f"Token {token_address} met buy conditions. Attempting to buy...")
-        return buy_token(token_address, config)
+        return buy_token(token_address, config, decision_ms=(time.monotonic() - decision_start) * 1000)
         return buy_token(token_address, config.user_id)
     else:
         print(f"Token {token_address} did not meet buy conditions. Skipping buy.")

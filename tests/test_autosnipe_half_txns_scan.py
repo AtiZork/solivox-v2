@@ -247,7 +247,9 @@ def test_autosnipe_buy_new_token_calls_buy_once():
             autosnipe_buy_new_token("MintABC", config)
 
     mock_should.assert_called_once()
-    mock_buy.assert_called_once_with("MintABC", config)
+    mock_buy.assert_called_once()
+    assert mock_buy.call_args.args == ("MintABC", config)
+    assert mock_buy.call_args.kwargs["decision_ms"] >= 0  # buy-decision time, for latency logs
 
 
 def test_inactive_config_skips_buy_entirely():

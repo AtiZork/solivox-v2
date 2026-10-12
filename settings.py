@@ -65,7 +65,7 @@ SNIPER_HTTP_FALLBACK = os.getenv("SNIPER_HTTP_FALLBACK", "true").lower() == "tru
 # Minimum gap (seconds) between sniper get_transaction RPC calls (mint/buy
 # resolution). Default is tuned for rate-limited public RPC; a dedicated
 # local validator (USE_LOCAL_NODE=true) can usually handle a much lower value.
-SNIPER_RPC_MIN_INTERVAL_SEC = float(os.getenv("SNIPER_RPC_MIN_INTERVAL_SEC", "0.25"))
+SNIPER_RPC_MIN_INTERVAL_SEC = max(0.0, float(os.getenv("SNIPER_RPC_MIN_INTERVAL_SEC", "0.25")))
 
 # Bounded worker pools for sniper event processing (replaces one-OS-thread-
 # per-event, which grows without limit under real load). Event pool handles
@@ -85,6 +85,14 @@ SNIPER_SELL_EVENT_WORKERS = int(os.getenv("SNIPER_SELL_EVENT_WORKERS", "8"))
 # trade: wallet holds 0 tokens -> EMPTY, any other failure -> RETRY.
 SNIPER_SELL_EMPTY_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_EMPTY_COOLDOWN_SEC", "60"))
 SNIPER_SELL_RETRY_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_RETRY_COOLDOWN_SEC", "2"))
+# A trade whose wallet balance first reads 0 is retried on the short cooldown
+# for this long (its buy may simply not have landed yet) before backing off
+# for SNIPER_SELL_EMPTY_COOLDOWN_SEC.
+SNIPER_SELL_EMPTY_GRACE_SEC = float(os.getenv("SNIPER_SELL_EMPTY_GRACE_SEC", "15"))
+
+# Interval for "[latency-summary]" log lines (aggregated sniper RPC / queue
+# timings). 0 disables the summaries; per-buy/per-sell "[latency]" lines stay.
+LATENCY_SUMMARY_INTERVAL_SEC = float(os.getenv("LATENCY_SUMMARY_INTERVAL_SEC", "30"))
 
 # How long (seconds) to keep tracking a mint's buy stream after it launched.
 # Past this, its buy-decision window has long closed, so we unsubscribe and

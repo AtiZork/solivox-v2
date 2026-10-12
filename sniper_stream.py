@@ -34,8 +34,10 @@ from settings import (
     get_solana_ws_urls,
     solana_client,
 )
+from latency_log import StageStats
 
 logger = logging.getLogger(__name__)
+rpc_stats = StageStats("sniper")
 
 PUMP_FUN_PROGRAM_ID = Pubkey.from_string(PUMP_FUN_PROGRAM_ID_STR)
 WSOL_MINT = "So11111111111111111111111111111111111111112"
@@ -45,7 +47,9 @@ _WS_RECONNECT_DELAY_SEC = 3
 _WS_MAX_RECONNECT_DELAY_SEC = 60
 
 # Throttle sniper get_transaction calls. Default is tuned for rate-limited
-# public RPC; override via SNIPER_RPC_MIN_INTERVAL_SEC for a local validator.
+# public RPC; override via SNIPER_RPC_MIN_INTERVAL_SEC for a local validator
+# (0 disables the throttle). Every call goes through this one lock, so the
+# interval caps all mint/buy resolution at 1/interval calls per second.
 _RPC_MIN_INTERVAL_SEC = SNIPER_RPC_MIN_INTERVAL_SEC
 _RPC_LOCK = threading.Lock()
 _LAST_RPC_AT = 0.0
@@ -62,8 +66,11 @@ _decision_pool = ThreadPoolExecutor(max_workers=SNIPER_DECISION_POOL_SIZE, threa
 
 def _submit_logged(pool: ThreadPoolExecutor, fn: Callable, *args) -> None:
     """Submit to a bounded pool, logging (not silently swallowing) any exception."""
+    submitted = time.monotonic()
+    stage = f"queue_wait.{getattr(pool, '_thread_name_prefix', 'pool')}"
 
     def _wrapped() -> None:
+        rpc_stats.record(stage, (time.monotonic() - submitted) * 1000)
         try:
             fn(*args)
         except Exception:
@@ -240,16 +247,24 @@ def _as_signature(signature: str | Signature) -> Signature:
 def _rpc_throttle() -> None:
     """Serialize and pace RPC calls to avoid 429 on public mainnet."""
     global _LAST_RPC_AT
+    if _RPC_MIN_INTERVAL_SEC <= 0:
+        return
     with _RPC_LOCK:
-        elapsed = time.time() - _LAST_RPC_AT
+        elapsed = time.monotonic() - _LAST_RPC_AT
         if elapsed < _RPC_MIN_INTERVAL_SEC:
             time.sleep(_RPC_MIN_INTERVAL_SEC - elapsed)
-        _LAST_RPC_AT = time.time()
+        _LAST_RPC_AT = time.monotonic()
 
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return "429" in msg or "too many request" in msg
+
+
+def _is_unsupported_version_error(exc: BaseException) -> bool:
+    """The tx exists but uses a newer version than requested: retrying can't help."""
+    msg = str(exc)
+    return "UnsupportedTransactionVersion" in msg or "Transaction version (" in msg
 
 
 def _extract_pump_mints_from_logs(logs: list) -> list[str]:
@@ -268,30 +283,48 @@ def _extract_pump_mints_from_logs(logs: list) -> list[str]:
 def _get_transaction_with_retry(signature: str, *, max_attempts: int = 5):
     """Fetch transaction with pacing, retries on 429, backoff when tx not indexed yet."""
     delays = (0.0, 0.3, 0.6, 1.0, 2.0)
+    started = time.monotonic()
     for attempt in range(max_attempts):
         if attempt > 0:
             time.sleep(delays[min(attempt, len(delays) - 1)])
         try:
+            wait_start = time.monotonic()
             _rpc_throttle()
-            resp = solana_client.get_transaction(
-                _as_signature(signature),
-                encoding="jsonParsed",
-                commitment=Confirmed,
-                max_supported_transaction_version=0,
-            )
+            call_start = time.monotonic()
+            rpc_stats.record("throttle_wait", (call_start - wait_start) * 1000)
+            try:
+                # Version 1 transactions are common on Pump.fun; requesting
+                # version 0 makes the node reject them outright.
+                resp = solana_client.get_transaction(
+                    _as_signature(signature),
+                    encoding="jsonParsed",
+                    commitment=Confirmed,
+                    max_supported_transaction_version=1,
+                )
+            finally:
+                rpc_stats.record("get_transaction", (time.monotonic() - call_start) * 1000)
             if resp.value is not None:
+                rpc_stats.record("resolve_total", (time.monotonic() - started) * 1000)
                 return resp.value
+            rpc_stats.count("tx_not_found_yet")
         except Exception as exc:
             if _is_rate_limit_error(exc):
+                rpc_stats.count("err_rate_limited")
                 logger.debug("RPC rate limited on %s (attempt %d)", signature[:16], attempt + 1)
                 time.sleep(0.5 * (attempt + 1))
                 continue
+            if _is_unsupported_version_error(exc):
+                rpc_stats.count("err_unsupported_tx_version")
+                logger.warning("get_transaction %s: unsupported transaction version: %s", signature[:16], exc)
+                return None
+            rpc_stats.count("err_other")
             logger.debug(
                 "get_transaction attempt %d for %s: %s",
                 attempt + 1,
                 signature[:16],
                 exc,
             )
+    rpc_stats.count("resolve_gave_up")
     return None
 
 
@@ -343,7 +376,7 @@ def _extract_mint_and_sol_from_buy_tx(signature: str) -> tuple[Optional[str], fl
     return mint, sol_spent
 
 
-def _process_create(signature: str, logs: list) -> None:
+def _process_create(signature: str, logs: list, received_at: Optional[float] = None) -> None:
     mint = _extract_mint_from_create(signature, logs)
     if not mint:
         logger.warning("[WS] Create detected but mint not resolved: %s", signature[:16])
@@ -352,7 +385,12 @@ def _process_create(signature: str, logs: list) -> None:
     if not stream_state.register_launch(mint, signature):
         return
 
-    logger.info("[WS] New Pump.fun token: %s (sig %s...)", mint, signature[:16])
+    since_ws_ms = (time.monotonic() - received_at) * 1000 if received_at else -1.0
+    rpc_stats.record("launch_ws_to_registered", since_ws_ms)
+    logger.info(
+        "[WS] New Pump.fun token: %s (sig %s...) registered %.0f ms after WS receipt",
+        mint, signature[:16], since_ws_ms,
+    )
     _request_mint_subscription(mint)
     if _on_new_token:
         _submit_logged(_decision_pool, _run_new_token_callback, mint)
@@ -364,7 +402,7 @@ def _handle_create(signature: str, logs: list) -> None:
     if not stream_state.mark_signature_seen(signature):
         return
     # Resolve mint via RPC in background so the WS loop stays responsive.
-    _submit_logged(_event_pool, _process_create, signature, list(logs))
+    _submit_logged(_event_pool, _process_create, signature, list(logs), time.monotonic())
 
 
 def _run_new_token_callback(mint: str) -> None:
@@ -384,7 +422,7 @@ def _request_mint_subscription(mint: str) -> None:
         logger.warning("Failed to schedule mint subscription for %s: %s", mint[:16], exc)
 
 
-def _process_mint_buy(mint: str, signature: str, logs: list) -> None:
+def _process_mint_buy(mint: str, signature: str, logs: list, received_at: Optional[float] = None) -> None:
     if not _logs_contain(logs, "Instruction: Buy"):
         return
     if not stream_state.mark_signature_seen(signature):
@@ -392,7 +430,11 @@ def _process_mint_buy(mint: str, signature: str, logs: list) -> None:
 
     _, sol_amount = _extract_mint_and_sol_from_buy_tx(signature)
     if sol_amount <= 0:
+        rpc_stats.count("buy_not_counted")
         return
+    if received_at:
+        # How late the buy-condition check sees this buy, vs the WS notification.
+        rpc_stats.record("buy_ws_to_counted", (time.monotonic() - received_at) * 1000)
 
     sol_usd = _get_sol_usd_price()
     usd_value = sol_amount * sol_usd
@@ -415,7 +457,7 @@ def _process_mint_buy(mint: str, signature: str, logs: list) -> None:
 
 
 def _handle_mint_buy(mint: str, signature: str, logs: list) -> None:
-    _submit_logged(_event_pool, _process_mint_buy, mint, signature, list(logs))
+    _submit_logged(_event_pool, _process_mint_buy, mint, signature, list(logs), time.monotonic())
 
 
 async def _pump_fun_ws_loop() -> None:
@@ -616,6 +658,13 @@ def start_sniper_stream(
     _listener_thread = threading.Thread(target=_run_listener_thread, name="sniper-ws", daemon=True)
     _listener_thread.start()
     logger.info("[WS] Sniper WebSocket listener thread started (endpoints: %s).", get_solana_ws_urls())
+    if _RPC_MIN_INTERVAL_SEC > 0:
+        logger.info(
+            "[WS] Sniper RPC throttle: SNIPER_RPC_MIN_INTERVAL_SEC=%.3f (max %.1f get_transaction calls/s, all mints combined)",
+            _RPC_MIN_INTERVAL_SEC, 1 / _RPC_MIN_INTERVAL_SEC,
+        )
+    else:
+        logger.info("[WS] Sniper RPC throttle: disabled (SNIPER_RPC_MIN_INTERVAL_SEC=0)")
     return True
 
 
