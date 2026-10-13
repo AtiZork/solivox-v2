@@ -16,6 +16,13 @@ from yellowstone_pricing import YellowstonePricingError
 PUMP_MINT = "6BFPDdf7VdkFdzePjWzVENzgigzs1DJmZJhKtjiTpump"
 
 
+@pytest.fixture(autouse=True)
+def _clear_yellowstone_cooldown():
+    sell_script._yellowstone_cooldown.clear()
+    yield
+    sell_script._yellowstone_cooldown.clear()
+
+
 def test_uses_yellowstone_when_enabled(capsys):
     yellowstone_result = {"usdPrice": 1.23, "usd_price": 1.23, "source": "yellowstone_grpc_accountSubscribe"}
 
@@ -71,6 +78,74 @@ def test_yellowstone_failure_falls_back_to_shyft():
     yellowstone_fetch.assert_called_once_with(PUMP_MINT)
     shyft_fetch.assert_called_once_with(PUMP_MINT, include_token_details=False)
     assert result["usdPrice"] == 7.89
+
+
+def test_yellowstone_failure_puts_mint_on_cooldown_skipping_next_call():
+    """
+    Regression: against ~30 real open (quiet) positions, re-attempting
+    Yellowstone on every sell-cycle tick made a full price pass take 20-30s
+    and exhausted the account's gRPC connection limit. A mint that just
+    timed out must skip straight to Shyft on the next call, not retry.
+    """
+    shyft_result = {"usdPrice": 7.89, "usd_price": 7.89, "source": "shyft_rpc_pumpfun_bonding_curve"}
+
+    with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
+        sell_script, "get_yellowstone_price", side_effect=YellowstonePricingError("unavailable"),
+    ) as yellowstone_fetch, patch.object(
+        sell_script, "get_token_price", return_value=shyft_result
+    ) as shyft_fetch, patch.object(sell_script, "logger", MagicMock()):
+        sell_script.get_sniper_sell_price(PUMP_MINT)  # times out, starts the cooldown
+        result = sell_script.get_sniper_sell_price(PUMP_MINT)  # must skip Yellowstone this time
+
+    yellowstone_fetch.assert_called_once()  # only the first call attempted it
+    assert shyft_fetch.call_count == 2
+    assert result["usdPrice"] == 7.89
+
+
+def test_yellowstone_cooldown_is_per_mint():
+    other_mint = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+    shyft_result = {"usdPrice": 1.0, "usd_price": 1.0}
+
+    with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
+        sell_script, "get_yellowstone_price", side_effect=YellowstonePricingError("unavailable"),
+    ) as yellowstone_fetch, patch.object(
+        sell_script, "get_token_price", return_value=shyft_result
+    ), patch.object(sell_script, "logger", MagicMock()):
+        sell_script.get_sniper_sell_price(PUMP_MINT)  # PUMP_MINT now on cooldown
+        sell_script.get_sniper_sell_price(other_mint)  # a different mint must still try
+
+    assert yellowstone_fetch.call_count == 2
+
+
+def test_yellowstone_cooldown_expires_and_retries():
+    shyft_result = {"usdPrice": 1.0, "usd_price": 1.0}
+
+    with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
+        sell_script, "get_yellowstone_price", side_effect=YellowstonePricingError("unavailable"),
+    ) as yellowstone_fetch, patch.object(
+        sell_script, "get_token_price", return_value=shyft_result
+    ), patch.object(sell_script, "logger", MagicMock()), patch.object(
+        sell_script, "SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC", 0.0
+    ):
+        sell_script.get_sniper_sell_price(PUMP_MINT)
+        sell_script.get_sniper_sell_price(PUMP_MINT)  # cooldown already elapsed (0s)
+
+    assert yellowstone_fetch.call_count == 2
+
+
+def test_yellowstone_success_clears_a_stale_cooldown_entry():
+    """A mint can start trading again after its cooldown window has elapsed
+    (dict entry still present, just expired); a successful fetch must clear it
+    so the next failure doesn't look like a repeat and extend it further."""
+    yellowstone_result = {"usdPrice": 1.23, "usd_price": 1.23, "source": "yellowstone_grpc_accountSubscribe"}
+    sell_script._yellowstone_cooldown[PUMP_MINT] = sell_script.time.monotonic() - 1  # already expired
+
+    with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
+        sell_script, "get_yellowstone_price", return_value=yellowstone_result
+    ):
+        sell_script.get_sniper_sell_price(PUMP_MINT)
+
+    assert PUMP_MINT not in sell_script._yellowstone_cooldown
 
 
 def test_yellowstone_and_shyft_both_failing_propagates():

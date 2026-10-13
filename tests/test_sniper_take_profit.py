@@ -373,6 +373,7 @@ def harness(tmp_path):
          patch.object(sell_script, "VersionedTransaction", _FakeVersionedTx), \
          patch.object(sell_script, "get_wallet_token_balance", side_effect=_balance), \
          patch.object(sell_script, "get_sniper_sell_price", side_effect=_price), \
+         patch.object(sell_script, "_http_session", requests_mock), \
          patch.object(sell_script, "logger", h.logger),          patch.object(sell_script, "SNIPER_SELL_EMPTY_GRACE_SEC", 0):
         sell_script.auto_snipe_auto_sell_schedular(h.app)
         h.run_cycle = h.jobs[0]

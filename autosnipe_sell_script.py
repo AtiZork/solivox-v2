@@ -4,6 +4,7 @@ import atexit
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 from dotenv import load_dotenv
 from models import db, Wallet, Trade, TradeLog, TradeHistory
@@ -12,6 +13,8 @@ import base64
 from flask import Blueprint
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
+from solders.signature import Signature
+from solders.transaction_status import TransactionConfirmationStatus
 from solana.rpc.commitment import Confirmed
 from solana.rpc.types import TxOpts
 from settings import (
@@ -23,6 +26,10 @@ from settings import (
     SNIPER_SELL_EMPTY_COOLDOWN_SEC,
     SNIPER_SELL_EMPTY_GRACE_SEC,
     SNIPER_SELL_RETRY_COOLDOWN_SEC,
+    SNIPER_SELL_RECONCILE_INTERVAL_SEC,
+    SNIPER_SELL_RECONCILE_TIMEOUT_SEC,
+    SNIPER_SELL_CYCLE_INTERVAL_SEC,
+    SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC,
 )
 from latency_log import StageTimer
 from sell_stream import SellStream
@@ -73,7 +80,18 @@ API_BASE_URL = "https://api.jup.ag" if API_KEY else "https://lite-api.jup.ag"
 headers = {"x-api-key": API_KEY} if API_KEY else {}
 sell_trade_bp = Blueprint('sell_trade_bp', __name__)
 
+# Reused across every quote/swap call instead of a bare requests.get/post,
+# which opens a brand-new TCP+TLS connection per call. Keep-alive here saves
+# a full handshake on every sell's swap request right after its quote request.
+_http_session = requests.Session()
+
 price_tracking = {}
+
+
+# mint -> time.monotonic() before which get_sniper_sell_price skips
+# Yellowstone entirely and goes straight to Shyft. See
+# SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC.
+_yellowstone_cooldown: dict = {}
 
 
 def get_sniper_sell_price(token_address: str) -> dict:
@@ -92,10 +110,21 @@ def get_sniper_sell_price(token_address: str) -> dict:
     Shyft RPC snapshot read (a point-in-time account fetch, not a
     subscription, so it works regardless of trading activity) instead of
     skipping the trade indefinitely.
+
+    A mint that just timed out goes on a short cooldown instead of
+    re-attempting Yellowstone on the very next tick: against a real set of
+    ~30 open (mostly quiet) positions, re-attempting on every tick made a
+    full price pass take 20-30s (10 workers x an 8s timeout each, repeatedly)
+    and exhausted the account's Yellowstone connection limit. Shyft's RPC
+    read is a live point-in-time read regardless, so skipping Yellowstone
+    during the cooldown costs no price freshness.
     """
     if is_yellowstone_enabled():
+        if time.monotonic() < _yellowstone_cooldown.get(token_address, 0.0):
+            return get_token_price(token_address, include_token_details=False)
         try:
             price_data = get_yellowstone_price(token_address)
+            _yellowstone_cooldown.pop(token_address, None)
             print(
                 "[Sell Price][Yellowstone/Geyser] Successfully retrieved "
                 f"token={token_address} usd_price={price_data.get('usdPrice')} "
@@ -104,9 +133,11 @@ def get_sniper_sell_price(token_address: str) -> dict:
             )
             return price_data
         except YellowstonePricingError as exc:
+            _yellowstone_cooldown[token_address] = time.monotonic() + SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC
             logger.warning(
                 f"Yellowstone price fetch failed for {token_address} "
-                f"({exc}); falling back to Shyft RPC snapshot."
+                f"({exc}); falling back to Shyft RPC snapshot and skipping "
+                f"Yellowstone for this mint for {SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC:.0f}s."
             )
             return get_token_price(token_address, include_token_details=False)
     return get_token_price(token_address, include_token_details=False)
@@ -300,7 +331,7 @@ def _sell_if_due(trade_data, current_price, trigger: str, timer: StageTimer | No
 
         quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
         with timer.stage("quote"):
-            quote_response = requests.get(quote_endpoint, params=quote_params, headers=headers, timeout=15)
+            quote_response = _http_session.get(quote_endpoint, params=quote_params, headers=headers, timeout=15)
         if quote_response.status_code != 200:
             quote_error = quote_response.json()
             logger.error(f"Error fetching quote for {trade_ref}: {quote_error}")
@@ -324,7 +355,7 @@ def _sell_if_due(trade_data, current_price, trigger: str, timer: StageTimer | No
 
         swap_endpoint = f"{API_BASE_URL}/swap/v1/swap"
         with timer.stage("swap"):
-            swap_response = requests.post(swap_endpoint, json=swap_request, headers=headers, timeout=15)
+            swap_response = _http_session.post(swap_endpoint, json=swap_request, headers=headers, timeout=15)
         if swap_response.status_code != 200:
             logger.error(f"Error performing swap for {trade_ref}: {swap_response.json()}")
             timer.reason = f"swap_http_{swap_response.status_code}"
@@ -363,7 +394,10 @@ def _sell_if_due(trade_data, current_price, trigger: str, timer: StageTimer | No
                 trade_kind="AutoSnipe",
                 amount=sold_tokens,
                 execution_price=current_price if current_price else 0,
-                tx_id=signature
+                tx_id=signature,
+                # Submitted, not yet confirmed on-chain; reconcile_pending_sells
+                # resolves this to "confirmed"/"failed" shortly after.
+                status="sent",
             )
             db.session.add(executed_trade)
             db.session.commit()
@@ -457,6 +491,115 @@ def _open_trade_mints(app) -> set:
         return {row[0] for row in rows}
 
 
+# --- Reconciliation: confirm "sent" sells, undo the ones that failed --------
+
+
+def _restore_unsold_position(trade, history, status: str) -> None:
+    """
+    A sell tx that never confirmed; give the tokens it claimed to sell back
+    to the open position so the bot offers them for sale again.
+
+    Runs under the trade's lock so it can't race a live sell attempt. Does
+    not restore take-profit tier bookkeeping (tp_pct_sold/last_tp_tier): the
+    position size is made whole either way, this only means that specific
+    tier's share may not be re-offered at that exact tier again and instead
+    waits for the next tier or a stop-loss/trailing-stop rule.
+    """
+    lock = _trade_lock(trade.id)
+    with lock:
+        try:
+            db.session.refresh(trade)
+        except Exception as e:
+            logger.warning(f"[Reconcile] could not refresh trade {trade.id}: {e}")
+            return
+        trade.purchased_token_amount = (trade.purchased_token_amount or 0) + history.amount
+        trade.executed = False
+        history.status = status
+        try:
+            db.session.commit()
+        except Exception as e:
+            logger.error(f"[Reconcile] failed to restore trade {trade.id} after {status} sell: {e}")
+            db.session.rollback()
+            return
+        _retry_after.pop(trade.id, None)
+        logger.error(
+            f"[Reconcile] sell tx {history.tx_id} for trade {trade.id} ({trade.token_address}) "
+            f"{status} on-chain; restored {history.amount} tokens to the open position."
+        )
+
+
+def reconcile_pending_sells(app) -> None:
+    """
+    Resolve every "sent" sell to its actual on-chain outcome.
+
+    send_transaction succeeding only means the RPC node accepted the
+    transaction for broadcast, not that it landed (expired blockhash,
+    slippage/liquidity moved before it processed, node never forwarded it,
+    etc.). Left unchecked, a failed send still looks like a completed sale
+    forever: purchased_token_amount was already reduced and the trade may be
+    marked executed, so no rule ever reconsiders tokens the wallet still
+    holds. This runs as its own periodic job (separate from the sell-decision
+    cycle) so a slow RPC here never delays detecting the next sell condition.
+    """
+    with app.app_context():
+        try:
+            pending = TradeHistory.query.filter_by(status="sent").all()
+        except Exception as e:
+            logger.warning(f"[Reconcile] could not load pending sells: {e}")
+            return
+        if not pending:
+            return
+
+        for history in pending:
+            age_sec = (
+                (datetime.utcnow() - history.timestamp).total_seconds() if history.timestamp else 0.0
+            )
+            try:
+                resp = solana_client.get_signature_statuses([Signature.from_string(history.tx_id)])
+                status = (resp.value or [None])[0]
+            except Exception as e:
+                logger.warning(f"[Reconcile] get_signature_statuses failed for {history.tx_id}: {e}")
+                continue
+
+            trade = Trade.query.get(history.trade_id) if history.trade_id else None
+
+            if status is None:
+                # Never seen by the node (dropped) or not old enough to give up on yet.
+                if age_sec >= SNIPER_SELL_RECONCILE_TIMEOUT_SEC:
+                    if trade is not None:
+                        _restore_unsold_position(trade, history, "failed_timeout")
+                    else:
+                        history.status = "failed_timeout"
+                        db.session.commit()
+                continue
+
+            if status.err is not None:
+                if trade is not None:
+                    _restore_unsold_position(trade, history, "failed")
+                else:
+                    history.status = "failed"
+                    db.session.commit()
+                continue
+
+            if status.confirmation_status in (
+                TransactionConfirmationStatus.Confirmed,
+                TransactionConfirmationStatus.Finalized,
+            ):
+                history.status = "confirmed"
+                db.session.commit()
+                logger.info(
+                    f"[latency] path=sell_confirm trade={history.trade_id} mint={history.token_address} "
+                    f"sig={history.tx_id} outcome=confirmed total={age_sec * 1000:.1f}"
+                )
+            elif age_sec >= SNIPER_SELL_RECONCILE_TIMEOUT_SEC:
+                # Processed but never reached "confirmed" within the timeout.
+                if trade is not None:
+                    _restore_unsold_position(trade, history, "failed_timeout")
+                else:
+                    history.status = "failed_timeout"
+                    db.session.commit()
+
+
 def auto_snipe_auto_sell_schedular(app):
     # Auto-snipe logic to sell tokens based on configurable conditions
     def auto_snipe_sell():
@@ -508,7 +651,10 @@ def auto_snipe_auto_sell_schedular(app):
                 time.sleep(1)
 
     scheduler = BackgroundScheduler()
-    scheduler.add_job(auto_snipe_sell, 'interval', seconds=5)
+    scheduler.add_job(auto_snipe_sell, 'interval', seconds=SNIPER_SELL_CYCLE_INTERVAL_SEC)
+    scheduler.add_job(
+        lambda: reconcile_pending_sells(app), 'interval', seconds=SNIPER_SELL_RECONCILE_INTERVAL_SEC
+    )
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
 

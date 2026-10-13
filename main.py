@@ -60,6 +60,9 @@ with app.app_context():
                 ("initial_token_amount", "DOUBLE PRECISION"),
                 ("tp_pct_sold", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
             ],
+            "trade_history": [
+                ("status", "VARCHAR(20) NOT NULL DEFAULT 'confirmed'"),
+            ],
         }
         try:
             insp = inspect(db.engine)

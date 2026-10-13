@@ -26,6 +26,7 @@ def get_trade_history(trade_id):
                 "amount": r.amount,
                 "execution_price": r.execution_price,
                 "tx_id": r.tx_id,
+                "status": getattr(r, "status", None),
                 "timestamp": r.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             }
             for r in records

@@ -298,6 +298,13 @@ class TradeHistory(db.Model):
     execution_price = db.Column(db.Float, nullable=False)
     tx_id = db.Column(db.String(255), nullable=False)  # Transaction ID
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    # "sent" (submitted, not yet confirmed) -> "confirmed" or "failed"/"failed_timeout".
+    # A send_transaction response only means the RPC node accepted the tx for
+    # broadcast, not that it landed; the reconciliation job
+    # (autosnipe_sell_script.reconcile_pending_sells) resolves "sent" rows and
+    # restores the position on a failure. Existing rows predate this tracking
+    # and are assumed settled, hence the "confirmed" default.
+    status = db.Column(db.String(20), nullable=False, default="confirmed")
 
 
 # Create Log Model
