@@ -39,6 +39,7 @@ from settings import (
     SHYFT_NETWORK,
     SHYFT_RPC_URL,
     SHYFT_WS_URL,
+    SOL_USD_PRICE_CACHE_TTL_SEC,
 )
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,9 @@ class ShyftPricingService:
         self.request_timeout_sec = request_timeout_sec
         self._stop_events: dict[str, threading.Event] = {}
         self._stream_threads: dict[str, threading.Thread] = {}
+        self._sol_usd_cache: Optional[float] = None
+        self._sol_usd_cache_at: float = 0.0
+        self._sol_usd_lock = threading.Lock()
 
         if not self.api_key:
             raise ShyftPricingError("SHYFT_API_KEY is not configured")
@@ -458,12 +462,30 @@ class ShyftPricingService:
         return len(raw) > 48 and raw[48] != 0
 
     def get_sol_usd(self) -> Optional[float]:
+        """
+        Latest SOL/USD from the Pyth feed, cached for SOL_USD_PRICE_CACHE_TTL_SEC.
+
+        Every bonding-curve/PumpSwap price read (the sell bot's hot path)
+        calls this; without the cache each one paid a second full Shyft RPC
+        round trip for a number that barely moves within a couple of
+        seconds, roughly doubling sell-decision latency.
+        """
+        now = time.monotonic()
+        with self._sol_usd_lock:
+            if self._sol_usd_cache is not None and (now - self._sol_usd_cache_at) < SOL_USD_PRICE_CACHE_TTL_SEC:
+                return self._sol_usd_cache
+
         raw = self._get_account_bytes(PYTH_SOL_PRICE_FEED)
         if not raw or len(raw) < 93:
             return None
         price_data = struct.unpack_from("<q", raw, 73)[0]
         exponent = struct.unpack_from("<i", raw, 89)[0]
-        return float(price_data) * (10.0 ** float(exponent))
+        value = float(price_data) * (10.0 ** float(exponent))
+
+        with self._sol_usd_lock:
+            self._sol_usd_cache = value
+            self._sol_usd_cache_at = now
+        return value
 
     def get_bonding_curve_price(self, mint: str) -> dict[str, Any]:
         mint = (mint or "").strip()

@@ -76,6 +76,13 @@ SNIPER_DECISION_POOL_SIZE = int(os.getenv("SNIPER_DECISION_POOL_SIZE", "20"))
 # Concurrent price fetches per sniper sell cycle. Sells themselves stay
 # sequential; raise with care, Shyft RPC/gRPC rate limits apply.
 SNIPER_SELL_PRICE_WORKERS = int(os.getenv("SNIPER_SELL_PRICE_WORKERS", "10"))
+# How often the backup sell-decision cycle re-evaluates every open trade.
+# This is only the safety net: the primary path is the instant per-mint
+# trigger (SNIPER_SELL_STREAM), which reacts the moment a token trades,
+# not on this interval. Lowering this adds a price-fetch RPC round trip per
+# open trade, per tick, through Shyft/Yellowstone — watch for 429s from
+# Shyft's rate limit if you push this below ~1s with many open positions.
+SNIPER_SELL_CYCLE_INTERVAL_SEC = float(os.getenv("SNIPER_SELL_CYCLE_INTERVAL_SEC", "1"))
 # Instant sells: re-check an open trade the moment its token trades (node
 # WebSocket logsSubscribe per open mint). The periodic cycle stays as a safety net.
 SNIPER_SELL_STREAM = os.getenv("SNIPER_SELL_STREAM", "true").lower() == "true"
@@ -89,6 +96,25 @@ SNIPER_SELL_RETRY_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_RETRY_COOLDOWN_SEC
 # for this long (its buy may simply not have landed yet) before backing off
 # for SNIPER_SELL_EMPTY_COOLDOWN_SEC.
 SNIPER_SELL_EMPTY_GRACE_SEC = float(os.getenv("SNIPER_SELL_EMPTY_GRACE_SEC", "15"))
+
+# How often (seconds) the sell bot re-checks "sent" sells against their actual
+# on-chain outcome (RPC getSignatureStatuses). A send_transaction response only
+# means the node accepted the tx for broadcast, not that it landed; this job
+# catches the ones that failed on-chain and gives the tokens back to the open
+# position instead of silently treating a failed send as a completed sale.
+SNIPER_SELL_RECONCILE_INTERVAL_SEC = float(os.getenv("SNIPER_SELL_RECONCILE_INTERVAL_SEC", "10"))
+# A "sent" sell still unconfirmed after this long is treated as failed/dropped
+# (expired blockhash, node never forwarded it, etc.) and reverted.
+SNIPER_SELL_RECONCILE_TIMEOUT_SEC = float(os.getenv("SNIPER_SELL_RECONCILE_TIMEOUT_SEC", "90"))
+
+# How long (seconds) a fetched SOL/USD price is reused before refetching.
+# get_sol_usd() is called on every single bonding-curve/PumpSwap price read
+# (sell decisions included); SOL/USD moves negligibly within a couple of
+# seconds, so caching it removes a full extra Shyft RPC round trip from the
+# hot sell-price path. Same technique already used for 60s in the buy flow
+# (sniper_stream._get_sol_usd_price); kept shorter here since sell decisions
+# are more price-sensitive.
+SOL_USD_PRICE_CACHE_TTL_SEC = float(os.getenv("SOL_USD_PRICE_CACHE_TTL_SEC", "1.5"))
 
 # Interval for "[latency-summary]" log lines (aggregated sniper RPC / queue
 # timings). 0 disables the summaries; per-buy/per-sell "[latency]" lines stay.
@@ -148,3 +174,14 @@ GEYSER_GRPC_URL = os.getenv("GEYSER_GRPC_URL", "")
 GEYSER_GRPC_TOKEN = os.getenv("GEYSER_GRPC_TOKEN", "")
 GEYSER_USE_TLS = os.getenv("GEYSER_USE_TLS", "true").lower() == "true"
 GEYSER_PRICE_TIMEOUT_SEC = float(os.getenv("GEYSER_PRICE_TIMEOUT_SEC", "8"))
+# A mint whose Yellowstone accountSubscribe just timed out/errored (it has
+# gone quiet - no new trade means no pushed update, ever, until it trades
+# again) skips straight to the Shyft RPC fallback for this long instead of
+# re-attempting Yellowstone (and paying GEYSER_PRICE_TIMEOUT_SEC again) on
+# every subsequent sell-cycle tick. Measured against live open positions:
+# with ~30 open quiet trades, re-attempting Yellowstone every tick meant a
+# full price pass took 20-30s and exhausted the account's gRPC connection
+# limit (observed PERMISSION_DENIED "Total connection limit reached").
+# Shyft's RPC read is a live point-in-time read either way, so skipping
+# Yellowstone during the cooldown costs no price freshness.
+SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC", "60"))

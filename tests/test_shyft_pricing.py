@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import struct
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -72,6 +73,48 @@ def test_price_sol_from_bonding_raw():
     raw = _bonding_raw(vt=1_000_000_000_000, vs=30_000_000_000)
     price = ShyftPricingService._price_sol_from_bonding_raw(raw)
     assert price == pytest.approx(30_000_000_000 / (1_000_000_000_000 * 1000.0))
+
+
+def test_get_sol_usd_caches_within_ttl(service: ShyftPricingService):
+    """
+    Every bonding-curve/PumpSwap price read calls get_sol_usd(); without
+    caching, each one pays a second full RPC round trip for a number that
+    barely moves within a couple of seconds, roughly doubling sell-decision
+    latency. One fetch must serve every call inside the TTL window.
+    """
+    with patch.object(service, "_get_account_bytes", return_value=_pyth_raw(150.0)) as get_bytes, \
+         patch("shyft_pricing.SOL_USD_PRICE_CACHE_TTL_SEC", 1.5):
+        first = service.get_sol_usd()
+        second = service.get_sol_usd()
+
+    assert first == pytest.approx(150.0)
+    assert second == pytest.approx(150.0)
+    get_bytes.assert_called_once()
+
+
+def test_get_sol_usd_refetches_after_ttl_expires(service: ShyftPricingService):
+    with patch.object(
+        service, "_get_account_bytes", side_effect=[_pyth_raw(150.0), _pyth_raw(160.0)]
+    ) as get_bytes, patch("shyft_pricing.SOL_USD_PRICE_CACHE_TTL_SEC", 0.05):
+        first = service.get_sol_usd()
+        time.sleep(0.07)
+        second = service.get_sol_usd()
+
+    assert first == pytest.approx(150.0)
+    assert second == pytest.approx(160.0)
+    assert get_bytes.call_count == 2
+
+
+def test_get_sol_usd_cache_is_per_instance(service: ShyftPricingService):
+    other = ShyftPricingService(
+        api_key="test-key", rpc_url=service.rpc_url, ws_url=service.ws_url,
+        api_base=service.api_base, network=service.network, session=MagicMock(),
+    )
+    with patch.object(service, "_get_account_bytes", return_value=_pyth_raw(150.0)):
+        service.get_sol_usd()
+    with patch.object(other, "_get_account_bytes", return_value=_pyth_raw(999.0)) as other_bytes:
+        assert other.get_sol_usd() == pytest.approx(999.0)
+    other_bytes.assert_called_once()
 
 
 def test_get_token_details_success(service: ShyftPricingService):
