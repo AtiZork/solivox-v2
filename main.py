@@ -73,6 +73,9 @@ with app.app_context():
             "trade_history": [
                 ("status", "VARCHAR(20) NOT NULL DEFAULT 'confirmed'"),
             ],
+            "trade_history": [
+                ("status", "VARCHAR(20) NOT NULL DEFAULT 'confirmed'"),
+            ],
         }
         try:
             insp = inspect(db.engine)
