@@ -92,6 +92,24 @@ SNIPER_SELL_EVENT_WORKERS = int(os.getenv("SNIPER_SELL_EVENT_WORKERS", "8"))
 # trade: wallet holds 0 tokens -> EMPTY, any other failure -> RETRY.
 SNIPER_SELL_EMPTY_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_EMPTY_COOLDOWN_SEC", "60"))
 SNIPER_SELL_RETRY_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_RETRY_COOLDOWN_SEC", "2"))
+# A Jupiter quote/swap 429 (rate limited) backs off this much longer than a
+# normal failure before retrying. Retrying a 429 on the same short cooldown as
+# any other error just keeps hammering a service that already asked to slow
+# down - observed causing a large backlog of simultaneously-due sells to keep
+# re-triggering 429s instead of draining.
+SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC", "20"))
+# Momentum-exit rule: a position whose token has had no detected trade for
+# this long is sold in full, regardless of price - once a token stops
+# trading, holding longer offers no new signal either way for a sniper
+# strategy. Master switch + the threshold itself.
+SNIPER_SELL_INACTIVITY_ENABLED = os.getenv("SNIPER_SELL_INACTIVITY_ENABLED", "true").lower() == "true"
+SNIPER_SELL_INACTIVITY_SEC = float(os.getenv("SNIPER_SELL_INACTIVITY_SEC", "5"))
+# How often the inactivity sweep compares "now" against each open mint's last
+# detected trade. This is pure in-memory timestamp comparison (no RPC calls),
+# so it can safely run far more often than the full price-fetch cycle - that
+# is what lets it detect the threshold promptly instead of waiting on however
+# long a full cycle pass over every open trade currently takes.
+SNIPER_SELL_INACTIVITY_SWEEP_SEC = float(os.getenv("SNIPER_SELL_INACTIVITY_SWEEP_SEC", "0.25"))
 # A trade whose wallet balance first reads 0 is retried on the short cooldown
 # for this long (its buy may simply not have landed yet) before backing off
 # for SNIPER_SELL_EMPTY_COOLDOWN_SEC.

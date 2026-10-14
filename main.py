@@ -50,15 +50,25 @@ with app.app_context():
                 ("half_txns_scan_enabled", "BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("half_txns_scan_duration", "INTEGER NOT NULL DEFAULT 30"),
                 ("sell_at_100", "DOUBLE PRECISION DEFAULT 10"),
+                ("sell_at_300", "DOUBLE PRECISION DEFAULT 10"),
+                ("sell_at_600", "DOUBLE PRECISION DEFAULT 10"),
+                ("sell_at_800", "DOUBLE PRECISION DEFAULT 10"),
+                ("inactivity_sell_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("inactivity_sell_seconds", "DOUBLE PRECISION NOT NULL DEFAULT 5"),
             ],
             "trade": [
                 ("drop_cutoff_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("drop_after_100_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("drop_after_400_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("sell_at_100", "DOUBLE PRECISION DEFAULT 10"),
+                ("sell_at_300", "DOUBLE PRECISION DEFAULT 10"),
+                ("sell_at_600", "DOUBLE PRECISION DEFAULT 10"),
+                ("sell_at_800", "DOUBLE PRECISION DEFAULT 10"),
                 ("last_tp_tier", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
                 ("initial_token_amount", "DOUBLE PRECISION"),
                 ("tp_pct_sold", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+                ("inactivity_sell_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("inactivity_sell_seconds", "DOUBLE PRECISION NOT NULL DEFAULT 5"),
             ],
             "trade_history": [
                 ("status", "VARCHAR(20) NOT NULL DEFAULT 'confirmed'"),
@@ -189,5 +199,5 @@ if __name__ == "__main__":
    # error on this publicly-bound (0.0.0.0) server execute arbitrary Python
    # code. use_reloader stays True so WERKZEUG_RUN_MAIN still gets set in the
    # child process, which the scheduler/sniper startup block above depends on.
-   socketio.run(app, host="0.0.0.0", port=8000, debug=False, use_reloader=True, allow_unsafe_werkzeug=True)
+   socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=True, allow_unsafe_werkzeug=True)
     # app.run(host="0.0.0.0", port=8000, debug=True)

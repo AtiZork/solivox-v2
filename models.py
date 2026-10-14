@@ -89,12 +89,22 @@ class AutoSnipeConfig(db.Model):
     # Sell at target profit % fields with defaults
     sell_at_100 = db.Column(db.Float, default=10)
     sell_at_200 = db.Column(db.Float, default=10)
+    sell_at_300 = db.Column(db.Float, default=10)
     sell_at_400 = db.Column(db.Float, default=10)
+    sell_at_600 = db.Column(db.Float, default=10)
+    sell_at_800 = db.Column(db.Float, default=10)
     sell_at_1000 = db.Column(db.Float, default=10)
     sell_at_1500 = db.Column(db.Float, default=10)
     sell_at_2500 = db.Column(db.Float, default=10)
     sell_at_4000 = db.Column(db.Float, default=10)
     sell_at_10000 = db.Column(db.Float, default=10)
+    # Momentum-exit rule: sell a position in full once its token has had no
+    # detected trade for this long. Copied onto each Trade at buy time (same
+    # pattern as drop_cutoff/drop_cutoff_enabled), so it can vary per sniper
+    # config even though the global SNIPER_SELL_INACTIVITY_* settings remain
+    # the master on/off switch and fallback default.
+    inactivity_sell_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    inactivity_sell_seconds = db.Column(db.Float, nullable=False, default=5.0)
     active = db.Column(db.Boolean, nullable=False, default=True)  # New field
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -119,12 +129,17 @@ class AutoSnipeConfig(db.Model):
             "drop_after_400_enabled": bool(self.drop_after_400_enabled),
             "sell_at_100": self.sell_at_100,
             "sell_at_200": self.sell_at_200,
+            "sell_at_300": getattr(self, "sell_at_300", 10),
             "sell_at_400": self.sell_at_400,
+            "sell_at_600": getattr(self, "sell_at_600", 10),
+            "sell_at_800": getattr(self, "sell_at_800", 10),
             "sell_at_1000": self.sell_at_1000,
             "sell_at_1500": self.sell_at_1500,
             "sell_at_2500": self.sell_at_2500,
             "sell_at_4000": self.sell_at_4000,
             "sell_at_10000": self.sell_at_10000,
+            "inactivity_sell_enabled": bool(getattr(self, "inactivity_sell_enabled", True)),
+            "inactivity_sell_seconds": getattr(self, "inactivity_sell_seconds", 5.0),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 
@@ -213,7 +228,10 @@ class Trade(db.Model):
     drop_after_400_enabled = db.Column(db.Boolean, nullable=False, default=True)
     sell_at_100 = db.Column(db.Float, default=10)
     sell_at_200 = db.Column(db.Float, default=10)
+    sell_at_300 = db.Column(db.Float, default=10)
     sell_at_400 = db.Column(db.Float, default=10)
+    sell_at_600 = db.Column(db.Float, default=10)
+    sell_at_800 = db.Column(db.Float, default=10)
     sell_at_1000 = db.Column(db.Float, default=10)
     sell_at_1500 = db.Column(db.Float, default=10)
     sell_at_2500 = db.Column(db.Float, default=10)
@@ -226,6 +244,11 @@ class Trade(db.Model):
     initial_token_amount = db.Column(db.Float, nullable=True)
     # Cumulative % of initial_token_amount already sold by take-profit tiers.
     tp_pct_sold = db.Column(db.Float, nullable=False, default=0)
+    # Momentum-exit rule: sell this position in full once its token has had
+    # no detected trade for this long. Captured from AutoSnipeConfig at buy
+    # time, same as drop_cutoff/drop_cutoff_enabled above.
+    inactivity_sell_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    inactivity_sell_seconds = db.Column(db.Float, nullable=False, default=5.0)
 
 
     def __repr__(self):

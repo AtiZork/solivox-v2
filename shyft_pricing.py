@@ -48,6 +48,8 @@ PUMP_FUN_PROGRAM_ID = Pubkey.from_string(PUMP_FUN_PROGRAM_ID_STR)
 TOKEN_METADATA_PROGRAM_ID = Pubkey.from_string("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")
 PYTH_SOL_PRICE_FEED = Pubkey.from_string("7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE")
 WSOL_MINT = "So11111111111111111111111111111111111111112"
+# USD-pegged, so a pool quoted in it needs no further SOL/USD conversion step.
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 # PumpSwap (Pump.fun's own AMM) — where tokens migrate once their bonding
 # curve completes. Program ID + Pool account layout confirmed against the
@@ -617,6 +619,20 @@ class ShyftPricingService:
             price_in_sol = price_in_quote
             sol_usd = self.get_sol_usd()
             usd = (price_in_sol * sol_usd) if sol_usd is not None else None
+        elif quote_mint == USDC_MINT:
+            usd = price_in_quote
+        else:
+            # Any other quote asset (e.g. a pool migrated to trade against
+            # another memecoin) would need a second price lookup for that
+            # asset itself, which this pricer doesn't do - log it instead of
+            # returning None silently, so a permanently-unpriceable pool is
+            # visible in the logs rather than a trade just going quiet forever.
+            logger.warning(
+                "PumpSwap pool %s for mint=%s is quoted in %s (not SOL or USDC); "
+                "cannot resolve a USD price without a secondary lookup for that "
+                "asset - usd_price will be None.",
+                pool_addr, mint, quote_mint,
+            )
 
         return {
             "mint": mint,

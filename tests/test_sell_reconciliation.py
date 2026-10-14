@@ -258,5 +258,5 @@ def test_scheduler_wires_reconcile_job_without_disturbing_sell_cycle_job():
          patch.object(sell_script, "atexit", MagicMock()):
         sell_script.auto_snipe_auto_sell_schedular(Flask("test"))
 
-    assert len(jobs) == 2
+    assert len(jobs) == 3  # cycle, reconcile, inactivity sweep
     assert jobs[0].__name__ == "auto_snipe_sell"

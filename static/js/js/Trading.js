@@ -105,13 +105,18 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
             drop_after_400_enabled: !!document.getElementById("updateDropAfter400Enabled")?.checked,
             sell_at_100: parseFloat(document.getElementById("updateSellAt100").value),
             sell_at_200: parseFloat(document.getElementById("updateSellAt200").value),
+            sell_at_300: parseFloat(document.getElementById("updateSellAt300").value),
             sell_at_400: parseFloat(document.getElementById("updateSellAt400").value),
+            sell_at_600: parseFloat(document.getElementById("updateSellAt600").value),
+            sell_at_800: parseFloat(document.getElementById("updateSellAt800").value),
             sell_at_1000: parseFloat(document.getElementById("updateSellAt1000").value),
             sell_at_1500: parseFloat(document.getElementById("updateSellAt1500").value),
             sell_at_2500: parseFloat(document.getElementById("updateSellAt2500").value),
             sell_at_4000: parseFloat(document.getElementById("updateSellAt4000").value),
             sell_at_10000: parseFloat(document.getElementById("updateSellAt10000").value),
             autosnipe_sell_slippage: parseFloat(document.getElementById("updateAutosnipeSellSlippage").value),
+            inactivity_sell_seconds: parseFloat(document.getElementById("updateInactivitySellSeconds").value),
+            inactivity_sell_enabled: !!document.getElementById("updateInactivitySellEnabled")?.checked,
         };
     } else {
         requestData = {
@@ -282,13 +287,18 @@ function openEditModal(value) {
         document.getElementById("updateDropAfter400Enabled").checked = transaction.drop_after_400_enabled !== false;
         document.getElementById("updateSellAt100").value = transaction.sell_at_100 ?? 10;
         document.getElementById("updateSellAt200").value = transaction.sell_at_200 ?? 10;
+        document.getElementById("updateSellAt300").value = transaction.sell_at_300 ?? 10;
         document.getElementById("updateSellAt400").value = transaction.sell_at_400 ?? 10;
+        document.getElementById("updateSellAt600").value = transaction.sell_at_600 ?? 10;
+        document.getElementById("updateSellAt800").value = transaction.sell_at_800 ?? 10;
         document.getElementById("updateSellAt1000").value = transaction.sell_at_1000 ?? 10;
         document.getElementById("updateSellAt1500").value = transaction.sell_at_1500 ?? 10;
         document.getElementById("updateSellAt2500").value = transaction.sell_at_2500 ?? 10;
         document.getElementById("updateSellAt4000").value = transaction.sell_at_4000 ?? 10;
         document.getElementById("updateSellAt10000").value = transaction.sell_at_10000 ?? 10;
         document.getElementById("updateAutosnipeSellSlippage").value = transaction.autosnipe_sell_slippage ?? 30;
+        document.getElementById("updateInactivitySellSeconds").value = transaction.inactivity_sell_seconds ?? 5;
+        document.getElementById("updateInactivitySellEnabled").checked = transaction.inactivity_sell_enabled !== false;
     } else {
         const isPending = isPendingTrade(transaction);
         if (isPending) {

@@ -597,12 +597,19 @@ def _buy_token_internal(token_address, config, timer=None):
             drop_after_400_enabled=bool(getattr(config, "drop_after_400_enabled", True)),
             sell_at_100=config.sell_at_100 if getattr(config, "sell_at_100", None) else 10,
             sell_at_200=config.sell_at_200 if config.sell_at_200 else 10,
+            sell_at_300=config.sell_at_300 if getattr(config, "sell_at_300", None) else 10,
             sell_at_400=config.sell_at_400 if config.sell_at_400 else 10,
+            sell_at_600=config.sell_at_600 if getattr(config, "sell_at_600", None) else 10,
+            sell_at_800=config.sell_at_800 if getattr(config, "sell_at_800", None) else 10,
             sell_at_1000=config.sell_at_1000 if config.sell_at_1000 else 10,
             sell_at_1500=config.sell_at_1500 if config.sell_at_1500 else 10,
             sell_at_2500=config.sell_at_2500 if config.sell_at_2500 else 10,
             sell_at_4000=config.sell_at_4000 if config.sell_at_4000 else 10,
             sell_at_10000=config.sell_at_10000 if config.sell_at_10000 else 10,
+            inactivity_sell_enabled=bool(getattr(config, "inactivity_sell_enabled", True)),
+            inactivity_sell_seconds=(
+                config.inactivity_sell_seconds if getattr(config, "inactivity_sell_seconds", None) else 5.0
+            ),
         )
         timer.outcome = "sent"
         with timer.stage("db"):

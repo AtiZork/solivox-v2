@@ -153,6 +153,73 @@ def test_kumo_live_state_sells_its_missed_100_and_200_percent_tiers():
     assert decision.take_profit_pct == 30
 
 
+def test_new_300_600_800_percent_tiers_added_per_mansoor_request():
+    """
+    Client request: add 300%, 600%, 800% take-profit tiers alongside the
+    existing ones, with the same behavior (sell their configured % of the
+    original position, once, when crossed).
+    """
+    trade = _live_config_trade(
+        sell_at_100=10, sell_at_200=10, sell_at_300=10, sell_at_400=10,
+        sell_at_600=10, sell_at_800=10, sell_at_1000=10,
+        initial_token_amount=1000.0,
+    )
+    # multiplier, expected cumulative %, expected tier label, expected tier threshold
+    expected = [
+        (2.1, 10, "100%", 2.0),
+        (3.1, 20, "200%", 3.0),
+        (4.1, 30, "300%", 4.0),
+        (5.1, 40, "400%", 5.0),
+        (7.1, 50, "600%", 7.0),
+        (9.1, 60, "800%", 9.0),
+        (11.1, 70, "1000%", 11.0),
+    ]
+    for multiplier, cumulative, label, tier in expected:
+        decision = evaluate_autosnipe_sell(trade, multiplier, {})
+        assert decision.take_profit_pct == cumulative, multiplier
+        assert decision.take_profit_tier == tier, multiplier
+        assert label in decision.message, multiplier
+        trade.tp_pct_sold = decision.take_profit_pct
+        trade.last_tp_tier = decision.take_profit_tier
+
+
+def test_price_jump_across_the_new_tiers_sells_all_of_them_at_once():
+    """A price that jumps straight from below 300% to above 800% (skipping
+    the individual tier checks in between, e.g. a fast pump) must still sell
+    every tier it passed through in one go, not just the highest one."""
+    trade = _live_config_trade(
+        sell_at_100=10, sell_at_200=10, sell_at_300=10, sell_at_400=10,
+        sell_at_600=10, sell_at_800=10,
+        initial_token_amount=1000.0,
+    )
+    decision = evaluate_autosnipe_sell(trade, 9.5, {})  # jumps past 300/400/600/800 at once
+    assert decision.amount == pytest.approx(600.0)  # 60% of original 1000
+    assert decision.take_profit_pct == 60
+    assert decision.take_profit_tier == 9.0
+    assert "800%" in decision.message
+
+
+def test_new_tiers_are_skipped_when_left_at_zero():
+    """Matches existing sell_at_200=0 behavior: a tier configured to 0% is
+    treated as disabled, not as "sell nothing but still mark it reached"."""
+    trade = _live_config_trade(sell_at_300=0, sell_at_600=0, sell_at_800=0, initial_token_amount=1000.0)
+    decision = evaluate_autosnipe_sell(trade, 9.5, {})
+    # Only 100%/200%/400%/1000% tiers (the live-config defaults) are nonzero;
+    # 9.5x hasn't reached 1000% (11.0) yet, so only 100/200/400 fire.
+    assert decision.take_profit_pct == 30
+    assert "400%" in decision.message
+
+
+def test_take_profit_tiers_are_in_ascending_threshold_order():
+    """Structural sanity check: evaluate_autosnipe_sell's "stop at the first
+    threshold not yet reached" logic silently breaks if tiers aren't sorted
+    ascending - this would have caught the new tiers being inserted wrong."""
+    from autosnipe_sell_logic import TAKE_PROFIT_TIERS
+
+    thresholds = [t[0] for t in TAKE_PROFIT_TIERS]
+    assert thresholds == sorted(thresholds)
+
+
 def test_clients_example_tiers_add_up_until_everything_is_sold():
     """At 100% sell 10, at 200% 10 more, at 400% 20 more, ... until all sold."""
     trade = _live_config_trade(sell_at_100=10, sell_at_200=10, sell_at_400=20, sell_at_1000=25,
@@ -356,6 +423,10 @@ def harness(tmp_path):
     sell_script.price_tracking.clear()
     sell_script._retry_after.clear()
     sell_script._empty_since.clear()
+    sell_script._last_activity.clear()
+    sell_script._no_price_warned_until.clear()
+    sell_script._stream_was_connected = False
+    sell_script._sell_stream = None
 
     h.stream = MagicMock()
     h.db = MagicMock()

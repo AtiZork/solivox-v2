@@ -305,13 +305,18 @@ def get_trades():
                 "drop_after_400_enabled": bool(getattr(trade, "drop_after_400_enabled", True)),
                 "sell_at_100": getattr(trade, "sell_at_100", 10),
                 "sell_at_200": trade.sell_at_200,
+                "sell_at_300": getattr(trade, "sell_at_300", 10),
                 "sell_at_400": trade.sell_at_400,
+                "sell_at_600": getattr(trade, "sell_at_600", 10),
+                "sell_at_800": getattr(trade, "sell_at_800", 10),
                 "sell_at_1000": trade.sell_at_1000,
                 "sell_at_1500": trade.sell_at_1500,
                 "sell_at_2500": trade.sell_at_2500,
                 "sell_at_4000": trade.sell_at_4000,
                 "sell_at_10000": trade.sell_at_10000,
                 "autosnipe_sell_slippage": trade.autosnipe_sell_slippage,
+                "inactivity_sell_enabled": bool(getattr(trade, "inactivity_sell_enabled", True)),
+                "inactivity_sell_seconds": getattr(trade, "inactivity_sell_seconds", 5),
             })
 
             trade_list.append(base_trade_data)
@@ -366,13 +371,18 @@ def update_trade(trade_id):
             "drop_after_400_enabled": "drop_after_400_enabled",
             "sell_at_100": "sell_at_100",
             "sell_at_200": "sell_at_200",
+            "sell_at_300": "sell_at_300",
             "sell_at_400": "sell_at_400",
+            "sell_at_600": "sell_at_600",
+            "sell_at_800": "sell_at_800",
             "sell_at_1000": "sell_at_1000",
             "sell_at_1500": "sell_at_1500",
             "sell_at_2500": "sell_at_2500",
             "sell_at_4000": "sell_at_4000",
             "sell_at_10000": "sell_at_10000",
             "autosnipe_sell_slippage": "autosnipe_sell_slippage",
+            "inactivity_sell_enabled": "inactivity_sell_enabled",
+            "inactivity_sell_seconds": "inactivity_sell_seconds",
         }
 
         # # Apply updates based on mapping

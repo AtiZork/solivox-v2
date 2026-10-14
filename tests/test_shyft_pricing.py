@@ -15,6 +15,7 @@ from shyft_pricing import (
     ShyftPricingError,
     ShyftPricingService,
     TokenPriceSnapshot,
+    USDC_MINT,
     WSOL_MINT,
     _redact_url,
     is_valid_mint,
@@ -382,6 +383,82 @@ def test_get_pumpswap_pool_price_success(service: ShyftPricingService):
     assert price["sol_price_usd"] == 150.0
     assert price["pumpswap_pool"] == pool_addr
     assert price["source"] == "shyft_rpc_pumpswap_pool"
+
+
+def test_get_pumpswap_pool_price_usdc_quote_needs_no_sol_conversion(service: ShyftPricingService):
+    """
+    A pool quoted in USDC is already USD-denominated - usd_price should equal
+    the raw quote-per-base ratio directly, with no SOL/USD step (and no call
+    to get_sol_usd, which would be meaningless for a non-SOL quote asset).
+    """
+    import base58
+
+    pool_addr = "PoolAddr111111111111111111111111111111111"
+    base_vault = base58.b58encode(bytes([7]) * 32).decode()
+    quote_vault = base58.b58encode(bytes([9]) * 32).decode()
+    pool_raw = _pumpswap_pool_raw(
+        base_mint=PUMP_MINT,
+        quote_mint=USDC_MINT,
+        base_vault=base_vault,
+        quote_vault=quote_vault,
+        virtual_quote_reserves=0,
+    )
+
+    def fake_rpc(method, params):
+        if method == "getTokenAccountBalance":
+            addr = params[0]
+            if addr == base_vault:
+                return {"value": {"amount": "1000000000000", "decimals": 6}}  # 1,000,000 tokens
+            if addr == quote_vault:
+                return {"value": {"amount": "20000000", "decimals": 6}}  # 20 USDC
+        return None
+
+    with patch.object(service, "find_pumpswap_pool", return_value=pool_addr), patch.object(
+        service, "_get_account_bytes", return_value=pool_raw
+    ), patch.object(service, "_rpc", side_effect=fake_rpc), patch.object(
+        service, "get_sol_usd"
+    ) as get_sol_usd:
+        price = service.get_pumpswap_pool_price(PUMP_MINT)
+
+    # 20 USDC / 1,000,000 tokens = 0.00002 USD/token
+    assert price["usd_price"] == pytest.approx(0.00002)
+    assert price["price_in_sol"] is None
+    assert price["sol_price_usd"] is None
+    get_sol_usd.assert_not_called()
+
+
+def test_get_pumpswap_pool_price_unsupported_quote_mint_logs_and_returns_none(service: ShyftPricingService):
+    """A pool quoted in some other token (e.g. migrated against another
+    memecoin) can't be priced without a second lookup for that asset - it
+    must not be silent about it, since that's exactly what previously left a
+    stuck position with zero log trail."""
+    import base58
+
+    other_quote_mint = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"  # e.g. $WIF
+    pool_addr = "PoolAddr111111111111111111111111111111111"
+    base_vault = base58.b58encode(bytes([7]) * 32).decode()
+    quote_vault = base58.b58encode(bytes([9]) * 32).decode()
+    pool_raw = _pumpswap_pool_raw(
+        base_mint=PUMP_MINT, quote_mint=other_quote_mint, base_vault=base_vault, quote_vault=quote_vault,
+    )
+
+    def fake_rpc(method, params):
+        if method == "getTokenAccountBalance":
+            addr = params[0]
+            if addr == base_vault:
+                return {"value": {"amount": "1000000000000", "decimals": 6}}
+            if addr == quote_vault:
+                return {"value": {"amount": "20000000", "decimals": 6}}
+        return None
+
+    with patch.object(service, "find_pumpswap_pool", return_value=pool_addr), patch.object(
+        service, "_get_account_bytes", return_value=pool_raw
+    ), patch.object(service, "_rpc", side_effect=fake_rpc), patch("shyft_pricing.logger") as mock_logger:
+        price = service.get_pumpswap_pool_price(PUMP_MINT)
+
+    assert price["usd_price"] is None
+    mock_logger.warning.assert_called_once()
+    assert other_quote_mint in mock_logger.warning.call_args.args
 
 
 def test_get_pumpswap_pool_price_raises_when_no_pool_found(service: ShyftPricingService):

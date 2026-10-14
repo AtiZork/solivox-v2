@@ -30,6 +30,10 @@ from settings import (
     SNIPER_SELL_RECONCILE_TIMEOUT_SEC,
     SNIPER_SELL_CYCLE_INTERVAL_SEC,
     SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC,
+    SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC,
+    SNIPER_SELL_INACTIVITY_ENABLED,
+    SNIPER_SELL_INACTIVITY_SEC,
+    SNIPER_SELL_INACTIVITY_SWEEP_SEC,
 )
 from latency_log import StageTimer
 from sell_stream import SellStream
@@ -37,7 +41,7 @@ from shyft_pricing import get_token_price
 from yellowstone_pricing import YellowstonePricingError, get_yellowstone_price, is_yellowstone_enabled
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
-from autosnipe_sell_logic import evaluate_autosnipe_sell
+from autosnipe_sell_logic import evaluate_autosnipe_sell, SellDecision
 
 log_messages = []
 
@@ -181,23 +185,51 @@ _retry_after: dict = {}
 _empty_since: dict = {}
 _UNROUTABLE_QUOTE_ERRORS = {"TOKEN_NOT_TRADABLE", "NO_ROUTES_FOUND"}
 
+# mint -> time.monotonic() of its last detected trade, or of the moment we
+# first started tracking it if none has been seen yet. Always seeded before
+# being judged "overdue" (see check_inactivity) - never left unset, so a mint
+# can't look infinitely inactive purely because nothing has been recorded for
+# it yet (e.g. every open mint right after a service restart).
+_last_activity: dict = {}
+_last_activity_guard = threading.Lock()
+# Set once the sell stream is created; check_inactivity reads .connected off
+# this before trusting an apparent silence - a WebSocket outage must not look
+# like every open token went quiet at once.
+_sell_stream: "SellStream | None" = None
+_stream_was_connected = False
+
+# trade id -> time.monotonic() before which the "no usable price" warning is
+# suppressed for that trade, so a permanently-unpriceable mint (see
+# shyft_pricing.get_pumpswap_pool_price) logs a repeated warning on a sane
+# interval instead of once per cycle tick forever.
+_no_price_warned_until: dict = {}
+_NO_PRICE_WARN_INTERVAL_SEC = 30.0
+
 
 def _trade_lock(trade_id) -> threading.Lock:
     with _trade_locks_guard:
         return _trade_locks.setdefault(trade_id, threading.Lock())
 
 
-def process_trade_sell(trade_data, current_price, trigger: str = "cycle", timings: dict | None = None) -> None:
+def process_trade_sell(
+    trade_data, current_price, trigger: str = "cycle", timings: dict | None = None,
+    force_reason: str | None = None,
+) -> None:
     """
     Evaluate one trade at current_price and execute the sell if a rule fires.
 
-    Shared by the periodic sell cycle and the instant (trade-activity) path;
-    must run inside an app context. The per-trade lock plus a fresh DB read
-    guarantee the two paths never sell the same trade at once or on stale
-    state (e.g. a cycle that loaded the trade before an instant sale).
+    Shared by the periodic sell cycle, the instant (trade-activity) path, and
+    the inactivity sweep; must run inside an app context. The per-trade lock
+    plus a fresh DB read guarantee no two paths ever sell the same trade at
+    once or act on stale state (e.g. a cycle that loaded the trade before
+    another path already sold it).
 
     timings: stages already measured by the caller (queue wait, price fetch),
     included in the "[latency]" line logged when a sell rule fires.
+
+    force_reason: when set, sells the full remaining position unconditionally
+    (bypassing the normal take-profit/stop-loss evaluation) - used by the
+    inactivity rule. See _sell_if_due.
     """
     lock = _trade_lock(trade_data.id)
     if not lock.acquire(blocking=False):
@@ -215,13 +247,15 @@ def process_trade_sell(trade_data, current_price, trigger: str = "cycle", timing
             return
         if trade_data.executed:
             return
-        outcome = _sell_if_due(trade_data, current_price, trigger, timer)
+        outcome = _sell_if_due(trade_data, current_price, trigger, timer, force_reason=force_reason)
         if outcome == "empty":
             _retry_after[trade_data.id] = time.monotonic() + SNIPER_SELL_EMPTY_COOLDOWN_SEC
             timer.fields["cooldown_sec"] = SNIPER_SELL_EMPTY_COOLDOWN_SEC
         elif outcome == "failed":
-            _retry_after[trade_data.id] = time.monotonic() + SNIPER_SELL_RETRY_COOLDOWN_SEC
-            timer.fields["cooldown_sec"] = SNIPER_SELL_RETRY_COOLDOWN_SEC
+            rate_limited = timer.reason in ("quote_http_429", "swap_http_429")
+            cooldown = SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC if rate_limited else SNIPER_SELL_RETRY_COOLDOWN_SEC
+            _retry_after[trade_data.id] = time.monotonic() + cooldown
+            timer.fields["cooldown_sec"] = cooldown
         elif outcome == "sold":
             _retry_after.pop(trade_data.id, None)
     finally:
@@ -232,22 +266,45 @@ def process_trade_sell(trade_data, current_price, trigger: str = "cycle", timing
             timer.finish(outcome)
 
 
-def _sell_if_due(trade_data, current_price, trigger: str, timer: StageTimer | None = None):
+def _sell_if_due(
+    trade_data, current_price, trigger: str, timer: StageTimer | None = None,
+    force_reason: str | None = None,
+):
     """
     Returns None when no sell rule fires, "cooling" while a recent failed
     attempt is still in its cooldown, "sold" after a sent transaction,
     "empty" when the wallet has nothing to sell (or the wallet/key can't be
     used), and "failed" for errors worth retrying soon. timer.reason says why.
+
+    force_reason: skip the normal take-profit/stop-loss evaluation and sell
+    the full remaining position unconditionally, with this as the reason
+    shown in the sell-decision log line. Used by the inactivity rule.
     """
     timer = timer or StageTimer("sell", trade=trade_data.id)
     if not current_price or current_price <= 0:
+        # Visible on purpose: a migrated token priced against a non-SOL,
+        # non-USDC quote asset (see shyft_pricing.get_pumpswap_pool_price)
+        # resolves to no usable price forever, which otherwise silently
+        # stops this trade from ever being re-evaluated with no log trail.
+        # Deduped to once per _NO_PRICE_WARN_INTERVAL_SEC per trade - this can
+        # otherwise fire every cycle tick, forever, for a permanently-stuck mint.
+        now = time.monotonic()
+        if now >= _no_price_warned_until.get(trade_data.id, 0.0):
+            _no_price_warned_until[trade_data.id] = now + _NO_PRICE_WARN_INTERVAL_SEC
+            logger.warning(
+                f"No usable price for trade {trade_data.id} ({trade_data.token_address}); "
+                f"skipping sell-condition evaluation this round."
+            )
         return
     initial_price = trade_data.initial_price
     if initial_price <= 0:
         logger.warning(f"Invalid initial price for trade {trade_data.id}. Skipping auto-snipe.")
         return
 
-    decision = evaluate_autosnipe_sell(trade_data, current_price, price_tracking)
+    if force_reason:
+        decision = SellDecision(amount=trade_data.purchased_token_amount or 0, message=f"Auto-Sell All: {force_reason}")
+    else:
+        decision = evaluate_autosnipe_sell(trade_data, current_price, price_tracking)
     amount_to_trade, message = decision.amount, decision.message
     if amount_to_trade <= 0:
         return
@@ -333,7 +390,26 @@ def _sell_if_due(trade_data, current_price, trigger: str, timer: StageTimer | No
         with timer.stage("quote"):
             quote_response = _http_session.get(quote_endpoint, params=quote_params, headers=headers, timeout=15)
         if quote_response.status_code != 200:
-            quote_error = quote_response.json()
+            # Tag by status code first, before attempting to parse a body:
+            # a 429 from the free Jupiter tier (lite-api.jup.ag) comes back
+            # as plain text ("Rate limit exceeded..."), not JSON. Parsing
+            # that would raise before the 429 was ever recorded, silently
+            # falling through to the generic (short) retry cooldown instead
+            # of the dedicated rate-limit backoff - observed live: a burst of
+            # simultaneous inactivity-triggered sells kept re-hitting the
+            # rate limit every 2s instead of backing off.
+            if quote_response.status_code == 429:
+                timer.reason = "quote_http_429"
+                logger.error(f"Rate limited fetching quote for {trade_ref}: {quote_response.text[:200]}")
+                return "failed"
+            try:
+                quote_error = quote_response.json()
+            except ValueError:
+                timer.reason = f"quote_http_{quote_response.status_code}"
+                logger.error(
+                    f"Error fetching quote for {trade_ref}: non-JSON response: {quote_response.text[:200]}"
+                )
+                return "failed"
             logger.error(f"Error fetching quote for {trade_ref}: {quote_error}")
             # Jupiter won't route this token at all right now; retrying every
             # few seconds only spams the API and the logs.
@@ -357,7 +433,15 @@ def _sell_if_due(trade_data, current_price, trigger: str, timer: StageTimer | No
         with timer.stage("swap"):
             swap_response = _http_session.post(swap_endpoint, json=swap_request, headers=headers, timeout=15)
         if swap_response.status_code != 200:
-            logger.error(f"Error performing swap for {trade_ref}: {swap_response.json()}")
+            if swap_response.status_code == 429:
+                timer.reason = "swap_http_429"
+                logger.error(f"Rate limited performing swap for {trade_ref}: {swap_response.text[:200]}")
+                return "failed"
+            try:
+                swap_error = swap_response.json()
+            except ValueError:
+                swap_error = swap_response.text[:200]
+            logger.error(f"Error performing swap for {trade_ref}: {swap_error}")
             timer.reason = f"swap_http_{swap_response.status_code}"
             return "failed"
 
@@ -444,6 +528,8 @@ def on_token_activity(app, mint: str) -> None:
     one check runs per mint at a time, and activity during a check triggers
     exactly one more check afterwards, so the latest price is always seen.
     """
+    with _last_activity_guard:
+        _last_activity[mint] = time.monotonic()
     with _instant_guard:
         if mint in _instant_running:
             _instant_rerun.setdefault(mint, time.monotonic())
@@ -489,6 +575,134 @@ def _open_trade_mints(app) -> set:
     with app.app_context():
         rows = Trade.query.with_entities(Trade.token_address).filter_by(executed=False, auto_snipe=True).all()
         return {row[0] for row in rows}
+
+
+# --- Inactivity rule: exit a position once its token goes quiet ------------
+
+
+def _inactivity_enabled_for(trade_data) -> bool:
+    """Per-trade override of the inactivity rule, captured from AutoSnipeConfig
+    at buy time. Missing/None (e.g. a trade bought before this field existed)
+    defaults to enabled, matching every other sniper enable-flag in this codebase."""
+    value = getattr(trade_data, "inactivity_sell_enabled", None)
+    return True if value is None else bool(value)
+
+
+def _inactivity_threshold_for(trade_data) -> float:
+    """Per-trade inactivity threshold (seconds). Missing/None/zero falls back
+    to the global SNIPER_SELL_INACTIVITY_SEC default."""
+    value = getattr(trade_data, "inactivity_sell_seconds", None)
+    return float(value) if value else SNIPER_SELL_INACTIVITY_SEC
+
+
+def _open_trades_inactivity_settings(app) -> dict:
+    """mint -> list of (enabled, threshold_sec) for every open auto-snipe
+    trade on that mint. Different trades on the same mint can be configured
+    differently (bought under different sniper configs), so check_inactivity
+    only needs this to decide whether ANY trade on the mint could be due;
+    _run_inactivity_check re-applies each trade's own settings individually
+    before actually selling it."""
+    with app.app_context():
+        trades = Trade.query.with_entities(
+            Trade.token_address, Trade.inactivity_sell_enabled, Trade.inactivity_sell_seconds
+        ).filter_by(executed=False, auto_snipe=True).all()
+    by_mint: dict = {}
+    for mint, enabled, seconds in trades:
+        by_mint.setdefault(mint, []).append((
+            True if enabled is None else bool(enabled),
+            float(seconds) if seconds else SNIPER_SELL_INACTIVITY_SEC,
+        ))
+    return by_mint
+
+
+def _run_inactivity_check(app, mint: str, elapsed: float) -> None:
+    with app.app_context():
+        try:
+            trades = Trade.query.filter_by(token_address=mint, executed=False, auto_snipe=True).all()
+            if not trades:
+                return
+            eligible = [
+                t for t in trades
+                if _inactivity_enabled_for(t) and elapsed >= _inactivity_threshold_for(t)
+            ]
+            if not eligible:
+                return
+            price_start = time.monotonic()
+            try:
+                price = get_token_price(mint, include_token_details=False)["usdPrice"]
+            except Exception as e:
+                logger.warning(f"[Inactivity] price fetch failed for {mint}, will retry next sweep: {e}")
+                return
+            timings = {"price": (time.monotonic() - price_start) * 1000, "inactivity_sec": elapsed}
+            for trade_data in eligible:
+                process_trade_sell(
+                    trade_data, price, trigger="inactivity", timings=timings,
+                    force_reason=f"no activity for {elapsed:.1f}s",
+                )
+        except Exception as e:
+            logger.warning(f"[Inactivity] check failed for {mint}: {e}")
+            db.session.rollback()
+
+
+def _reset_activity_tracking() -> None:
+    """
+    Called when the sell stream (re)connects: every mint already being
+    tracked gets a fresh grace period instead of looking instantly overdue
+    because of timestamps from before an outage.
+    """
+    now = time.monotonic()
+    with _last_activity_guard:
+        for mint in _last_activity:
+            _last_activity[mint] = now
+
+
+def check_inactivity(app) -> None:
+    """
+    Sell a position in full once its token has had no detected trade for
+    SNIPER_SELL_INACTIVITY_SEC. Runs as its own frequent, cheap sweep - pure
+    in-memory timestamp comparisons, no RPC calls - so it detects the
+    threshold promptly regardless of how long a full price-fetch cycle pass
+    over every open trade currently takes.
+
+    Requires a healthy sell-stream connection: with it down, there is no
+    activity signal at all, so silence means "we're not receiving data", not
+    "the token stopped trading" - firing sells in that state is exactly the
+    false positive this rule must not produce.
+    """
+    global _stream_was_connected
+    if not SNIPER_SELL_INACTIVITY_ENABLED or _sell_stream is None:
+        return
+
+    # The module logger has a DB handler (writes TradeLog rows), which needs
+    # a pushed app context even for a plain logger.info() call - this job
+    # runs on its own APScheduler thread with no context of its own.
+    with app.app_context():
+        connected = _sell_stream.connected
+        if connected and not _stream_was_connected:
+            _reset_activity_tracking()
+            logger.info("[Inactivity] sell stream (re)connected; activity timers reset for a fresh grace period.")
+        _stream_was_connected = connected
+        if not connected:
+            return
+
+        now = time.monotonic()
+        due: list[tuple[str, float]] = []
+        with _last_activity_guard:
+            for mint, settings in _open_trades_inactivity_settings(app).items():
+                last = _last_activity.get(mint)
+                if last is None:
+                    _last_activity[mint] = now  # first time seen: its grace period starts now
+                    continue
+                elapsed = now - last
+                # Coarse per-mint pre-filter: fire if ANY trade on this mint
+                # could be due. _run_inactivity_check applies each trade's
+                # own enabled/threshold again before actually selling it.
+                if any(enabled and elapsed >= threshold for enabled, threshold in settings):
+                    due.append((mint, elapsed))
+                    _last_activity[mint] = now  # don't re-fire every sweep tick while this attempt plays out
+
+    for mint, elapsed in due:
+        _instant_pool.submit(_run_inactivity_check, app, mint, elapsed)
 
 
 # --- Reconciliation: confirm "sent" sells, undo the ones that failed --------
@@ -601,6 +815,7 @@ def reconcile_pending_sells(app) -> None:
 
 
 def auto_snipe_auto_sell_schedular(app):
+    global _sell_stream
     # Auto-snipe logic to sell tokens based on configurable conditions
     def auto_snipe_sell():
         with app.app_context():
@@ -655,6 +870,10 @@ def auto_snipe_auto_sell_schedular(app):
     scheduler.add_job(
         lambda: reconcile_pending_sells(app), 'interval', seconds=SNIPER_SELL_RECONCILE_INTERVAL_SEC
     )
+    if SNIPER_SELL_INACTIVITY_ENABLED:
+        scheduler.add_job(
+            lambda: check_inactivity(app), 'interval', seconds=SNIPER_SELL_INACTIVITY_SWEEP_SEC
+        )
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
 
@@ -665,4 +884,5 @@ def auto_snipe_auto_sell_schedular(app):
             sync_interval=SNIPER_SELL_STREAM_SYNC_SEC,
         )
         stream.start()
+        _sell_stream = stream
         atexit.register(stream.stop)

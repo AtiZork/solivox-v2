@@ -95,6 +95,7 @@ _SNIPER_ENABLE_FIELDS = (
     "drop_cutoff_enabled",
     "drop_after_100_enabled",
     "drop_after_400_enabled",
+    "inactivity_sell_enabled",
 )
 
 
@@ -143,7 +144,9 @@ def autosnipe():
 
         # sell-related
         for f in ['drop_cutoff','drop_until_profit','drop_after_100','drop_after_400',
-                  'sell_at_100','sell_at_200','sell_at_400','sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000']:
+                  'sell_at_100','sell_at_200','sell_at_300','sell_at_400','sell_at_600','sell_at_800',
+                  'sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000',
+                  'inactivity_sell_seconds']:
             if f in data:
                 try:
                     setattr(config, f, float(data.get(f)))
@@ -211,12 +214,17 @@ def list_autosnipers():
                         'drop_after_400_enabled': bool(row.get('drop_after_400_enabled')) if 'drop_after_400_enabled' in row else True,
                         'sell_at_100': row.get('sell_at_100', 10),
                         'sell_at_200': row.get('sell_at_200', 10),
+                        'sell_at_300': row.get('sell_at_300', 10),
                         'sell_at_400': row.get('sell_at_400', 10),
+                        'sell_at_600': row.get('sell_at_600', 10),
+                        'sell_at_800': row.get('sell_at_800', 10),
                         'sell_at_1000': row.get('sell_at_1000', 10),
                         'sell_at_1500': row.get('sell_at_1500', 10),
                         'sell_at_2500': row.get('sell_at_2500', 10),
                         'sell_at_4000': row.get('sell_at_4000', 10),
                         'sell_at_10000': row.get('sell_at_10000', 10),
+                        'inactivity_sell_enabled': bool(row.get('inactivity_sell_enabled')) if 'inactivity_sell_enabled' in row else True,
+                        'inactivity_sell_seconds': row.get('inactivity_sell_seconds', 5),
                         'timestamp': row.get('timestamp').isoformat() if row.get('timestamp') else None,
                     }
                     rows.append(mapped)
@@ -259,12 +267,17 @@ def get_autosnipe():
                 "drop_after_400_enabled": bool(getattr(config, "drop_after_400_enabled", True)),
                 "sell_at_100": getattr(config, "sell_at_100", 10),
                 "sell_at_200": config.sell_at_200,
+                "sell_at_300": getattr(config, "sell_at_300", 10),
                 "sell_at_400": config.sell_at_400,
+                "sell_at_600": getattr(config, "sell_at_600", 10),
+                "sell_at_800": getattr(config, "sell_at_800", 10),
                 "sell_at_1000": config.sell_at_1000,
                 "sell_at_1500": config.sell_at_1500,
                 "sell_at_2500": config.sell_at_2500,
                 "sell_at_4000": config.sell_at_4000,
                 "sell_at_10000": config.sell_at_10000,
+                "inactivity_sell_enabled": bool(getattr(config, "inactivity_sell_enabled", True)),
+                "inactivity_sell_seconds": getattr(config, "inactivity_sell_seconds", 5),
                 "id": config.id,
             })
         return jsonify({})
@@ -302,12 +315,17 @@ def get_autosnipe():
                     'drop_after_400_enabled': bool(r.get('drop_after_400_enabled')) if 'drop_after_400_enabled' in r else True,
                     'sell_at_100': r.get('sell_at_100', 10),
                     'sell_at_200': r.get('sell_at_200', 10),
+                    'sell_at_300': r.get('sell_at_300', 10),
                     'sell_at_400': r.get('sell_at_400', 10),
+                    'sell_at_600': r.get('sell_at_600', 10),
+                    'sell_at_800': r.get('sell_at_800', 10),
                     'sell_at_1000': r.get('sell_at_1000', 10),
                     'sell_at_1500': r.get('sell_at_1500', 10),
                     'sell_at_2500': r.get('sell_at_2500', 10),
                     'sell_at_4000': r.get('sell_at_4000', 10),
                     'sell_at_10000': r.get('sell_at_10000', 10),
+                    'inactivity_sell_enabled': bool(r.get('inactivity_sell_enabled')) if 'inactivity_sell_enabled' in r else True,
+                    'inactivity_sell_seconds': r.get('inactivity_sell_seconds', 5),
                     'id': r.get('id'),
                 }
                 return jsonify(mapped), 200
@@ -356,7 +374,9 @@ def update_autosnipe(config_id):
             except Exception:
                 pass
         for f in ['drop_cutoff','drop_until_profit','drop_after_100','drop_after_400',
-                  'sell_at_100','sell_at_200','sell_at_400','sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000']:
+                  'sell_at_100','sell_at_200','sell_at_300','sell_at_400','sell_at_600','sell_at_800',
+                  'sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000',
+                  'inactivity_sell_seconds']:
             if f in data:
                 try:
                     setattr(config, f, float(data.get(f)))

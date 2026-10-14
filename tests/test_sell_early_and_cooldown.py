@@ -9,7 +9,7 @@ marked "empty" and backed off for SNIPER_SELL_EMPTY_COOLDOWN_SEC (60s).
 from __future__ import annotations
 
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from solana.rpc.commitment import Confirmed
@@ -102,6 +102,74 @@ def test_cooldown_reason_is_logged(harness, latency, setup, outcome, reason):
     assert "cooldown_sec=" in line
 
 
+def test_rate_limited_quote_backs_off_longer_than_a_generic_failure(harness, latency):
+    """
+    Regression: a Jupiter 429 used to retry on the same short cooldown as any
+    other failure. Under a backlog of many simultaneously-due sells, that just
+    kept re-triggering 429s instead of letting the backlog drain.
+    """
+    trade = _live_config_trade(id=28, token_address="MintRL")
+    harness.trades = [trade]
+    harness.prices = {"MintRL": 0.5}
+
+    def _rate_limited(trade_data, current_price, trigger, timer=None, force_reason=None):
+        timer.reason = "quote_http_429"
+        return "failed"
+
+    with patch.object(sell_script, "_sell_if_due", side_effect=_rate_limited):
+        harness.run_cycle()
+
+    wait = sell_script._retry_after[28] - time.monotonic()
+    assert sell_script.SNIPER_SELL_RETRY_COOLDOWN_SEC < wait <= sell_script.SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC
+    assert "cooldown_sec=20.0" in _lines(latency)[-1]
+
+
+def test_rate_limited_swap_also_gets_the_longer_cooldown(harness, latency):
+    trade = _live_config_trade(id=29, token_address="MintRL2")
+    harness.trades = [trade]
+    harness.prices = {"MintRL2": 0.5}
+
+    def _rate_limited(trade_data, current_price, trigger, timer=None, force_reason=None):
+        timer.reason = "swap_http_429"
+        return "failed"
+
+    with patch.object(sell_script, "_sell_if_due", side_effect=_rate_limited):
+        harness.run_cycle()
+
+    wait = sell_script._retry_after[29] - time.monotonic()
+    assert wait > sell_script.SNIPER_SELL_RETRY_COOLDOWN_SEC
+
+
+def test_non_json_429_quote_response_still_gets_tagged_and_backed_off(harness, latency):
+    """
+    Regression: the free Jupiter tier (lite-api.jup.ag, no API_KEY) returns a
+    plain-text body for a 429 ("Rate limit exceeded..."), not JSON. Calling
+    .json() on that raised before the status code was ever checked, so the
+    429 fell through to the generic exception handler and got the short 2s
+    cooldown instead of the dedicated rate-limit backoff - observed live
+    during a burst of simultaneous inactivity-triggered sells.
+    """
+    trade = _live_config_trade(id=31, token_address="MintFreeTier")
+    harness.trades = [trade]
+    harness.prices = {"MintFreeTier": 0.5}
+
+    def _non_json_429(url, params=None, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+        resp.text = "Rate limit exceeded, please try again later."
+        return resp
+
+    harness.requests.get.side_effect = _non_json_429
+
+    harness.run_cycle()
+
+    wait = sell_script._retry_after[31] - time.monotonic()
+    assert sell_script.SNIPER_SELL_RETRY_COOLDOWN_SEC < wait <= sell_script.SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC
+    line = _lines(latency)[-1]
+    assert "outcome=failed" in line and "reason=quote_http_429" in line and "cooldown_sec=20.0" in line
+
+
 def test_sold_line_has_stages_and_signature(harness, latency):
     tp = _live_config_trade(id=24, token_address="MintTP")
     harness.trades = [tp]
@@ -149,3 +217,27 @@ def test_no_latency_line_while_cooling(harness, latency):
 
     assert harness.sent == 0
     assert _lines(latency) == []
+
+
+def test_unusable_price_is_warned_about_once_then_deduped(harness):
+    """
+    Regression: a migrated token priced against a non-SOL/non-USDC quote
+    asset (see shyft_pricing.get_pumpswap_pool_price) resolves to no usable
+    price forever. Previously this failed completely silently; it must now
+    warn, but not spam a warning every single cycle tick forever.
+    """
+    sell_script._no_price_warned_until.clear()
+    trade = _live_config_trade(id=30, token_address="MintUnpriceable")
+    harness.trades = [trade]
+    harness.prices = {"MintUnpriceable": None}
+
+    harness.run_cycle()
+    first_count = harness.logger.warning.call_count
+    assert any("No usable price" in str(c.args[0]) for c in harness.logger.warning.call_args_list)
+
+    harness.run_cycle()  # immediately again: must not re-warn yet
+    assert harness.logger.warning.call_count == first_count
+
+    sell_script._no_price_warned_until[30] = 0  # simulate the dedup window elapsing
+    harness.run_cycle()
+    assert harness.logger.warning.call_count > first_count

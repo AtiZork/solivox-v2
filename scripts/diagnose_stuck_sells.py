@@ -56,9 +56,11 @@ def main() -> int:
             print(f"  drop_cutoff        = {trade_data.drop_cutoff}%  "
                   f"(enabled={getattr(trade_data, 'drop_cutoff_enabled', True)})")
             print(f"  drop_until_profit  = {trade_data.drop_until_profit}%")
-            print(f"  sell_at_100/200/400/1000/1500/2500/4000/10000 = "
+            print(f"  sell_at_100/200/300/400/600/800/1000/1500/2500/4000/10000 = "
                   f"{getattr(trade_data, 'sell_at_100', None)}/"
-                  f"{trade_data.sell_at_200}/{trade_data.sell_at_400}/"
+                  f"{trade_data.sell_at_200}/{getattr(trade_data, 'sell_at_300', None)}/"
+                  f"{trade_data.sell_at_400}/{getattr(trade_data, 'sell_at_600', None)}/"
+                  f"{getattr(trade_data, 'sell_at_800', None)}/"
                   f"{trade_data.sell_at_1000}/{trade_data.sell_at_1500}/"
                   f"{trade_data.sell_at_2500}/{trade_data.sell_at_4000}/"
                   f"{trade_data.sell_at_10000}  (% of holdings sold at each profit tier)")
