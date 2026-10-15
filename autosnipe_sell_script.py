@@ -34,11 +34,19 @@ from settings import (
     SNIPER_SELL_INACTIVITY_ENABLED,
     SNIPER_SELL_INACTIVITY_SEC,
     SNIPER_SELL_INACTIVITY_SWEEP_SEC,
+    GEYSER_USE_PERSISTENT_STREAM,
 )
 from latency_log import StageTimer
 from sell_stream import SellStream
 from shyft_pricing import get_token_price
-from yellowstone_pricing import YellowstonePricingError, get_yellowstone_price, is_yellowstone_enabled
+from yellowstone_pricing import (
+    YellowstonePricingError,
+    get_yellowstone_price,
+    get_yellowstone_price_cached,
+    is_yellowstone_enabled,
+    start_yellowstone_stream,
+    stop_yellowstone_stream,
+)
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
 from autosnipe_sell_logic import evaluate_autosnipe_sell, SellDecision
@@ -107,27 +115,40 @@ def get_sniper_sell_price(token_address: str) -> dict:
     disabled/unconfigured, so today's behavior is unchanged until it's
     turned on.
 
-    Yellowstone's accountSubscribe only ever delivers a price while the
-    token is actively trading - a token that has gone quiet (no more
-    buys/sells) will time out on every single cycle forever, since there is
-    no new account update for it to push. When that happens, fall back to a
-    Shyft RPC snapshot read (a point-in-time account fetch, not a
-    subscription, so it works regardless of trading activity) instead of
-    skipping the trade indefinitely.
+    GEYSER_USE_PERSISTENT_STREAM (default true) selects which Yellowstone
+    path is used:
+      - cached (get_yellowstone_price_cached): reads the persistent
+        YellowstonePriceStream's in-memory cache, seeding a mint the first
+        time it's needed via one direct RPC read. Never blocks waiting on a
+        live gRPC push, since a short-lived accountSubscribe can only ever
+        receive a push for a *future* account write (Yellowstone's
+        snapshot/startup replay happens once, at the plugin's own boot, not
+        for a filter a client adds afterward) - so a quiet token on that
+        older path timed out every single call, for nothing.
+      - one-shot (get_yellowstone_price): the original subscribe-and-wait
+        call, kept only as an instant rollback if the persistent stream
+        ever needs to be backed out without a code change.
 
-    A mint that just timed out goes on a short cooldown instead of
-    re-attempting Yellowstone on the very next tick: against a real set of
-    ~30 open (mostly quiet) positions, re-attempting on every tick made a
-    full price pass take 20-30s (10 workers x an 8s timeout each, repeatedly)
-    and exhausted the account's Yellowstone connection limit. Shyft's RPC
-    read is a live point-in-time read regardless, so skipping Yellowstone
-    during the cooldown costs no price freshness.
+    Either way, a failure (disabled stream not yet seeded and the seed read
+    itself fails, or a genuine gRPC error on the one-shot path) falls back
+    to a Shyft RPC snapshot read (works regardless of trading activity)
+    instead of skipping the trade indefinitely, and puts the mint on a
+    short cooldown instead of re-attempting Yellowstone on the very next
+    tick: against a real set of ~30 open (mostly quiet) positions on the
+    old one-shot path, re-attempting on every tick made a full price pass
+    take 20-30s (10 workers x an 8s timeout each, repeatedly) and exhausted
+    the account's Yellowstone connection limit. Shyft's RPC read is a live
+    point-in-time read regardless, so skipping Yellowstone during the
+    cooldown costs no price freshness.
     """
     if is_yellowstone_enabled():
         if time.monotonic() < _yellowstone_cooldown.get(token_address, 0.0):
             return get_token_price(token_address, include_token_details=False)
         try:
-            price_data = get_yellowstone_price(token_address)
+            if GEYSER_USE_PERSISTENT_STREAM:
+                price_data = get_yellowstone_price_cached(token_address)
+            else:
+                price_data = get_yellowstone_price(token_address)
             _yellowstone_cooldown.pop(token_address, None)
             print(
                 "[Sell Price][Yellowstone/Geyser] Successfully retrieved "
@@ -886,3 +907,8 @@ def auto_snipe_auto_sell_schedular(app):
         stream.start()
         _sell_stream = stream
         atexit.register(stream.stop)
+
+    if GEYSER_USE_PERSISTENT_STREAM:
+        yellowstone_stream = start_yellowstone_stream(get_open_mints=lambda: _open_trade_mints(app))
+        if yellowstone_stream is not None:
+            atexit.register(stop_yellowstone_stream)

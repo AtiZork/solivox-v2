@@ -255,7 +255,14 @@ def test_scheduler_wires_reconcile_job_without_disturbing_sell_cycle_job():
     with patch.object(sell_script, "BackgroundScheduler", _Scheduler), \
          patch.object(sell_script, "SellStream", MagicMock()), \
          patch.object(sell_script, "SNIPER_SELL_STREAM", False), \
+         patch.object(sell_script, "GEYSER_USE_PERSISTENT_STREAM", False), \
          patch.object(sell_script, "atexit", MagicMock()):
+        # GEYSER_USE_PERSISTENT_STREAM patched off regardless of this
+        # machine's real .env: without it, a local dev .env with
+        # USE_GEYSER=true (left over from live Yellowstone testing) would
+        # make this "unit" test start a real persistent background thread
+        # connecting to a real remote gRPC endpoint - exactly the kind of
+        # test pollution SellStream is already isolated from above.
         sell_script.auto_snipe_auto_sell_schedular(Flask("test"))
 
     assert len(jobs) == 3  # cycle, reconcile, inactivity sweep
