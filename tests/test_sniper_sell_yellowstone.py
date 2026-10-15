@@ -2,6 +2,12 @@
 Tests that the Sniper sell flow's price selection correctly routes to
 Yellowstone (when enabled) vs. the existing Shyft path (unchanged default),
 and propagates the fetched price unmodified.
+
+GEYSER_USE_PERSISTENT_STREAM defaults to true, so get_sniper_sell_price()
+calls get_yellowstone_price_cached() (the persistent-stream-backed path) by
+default; these tests patch that name. The GEYSER_USE_PERSISTENT_STREAM=false
+legacy (one-shot get_yellowstone_price()) escape hatch is covered at the
+bottom of this file.
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ def test_uses_yellowstone_when_enabled(capsys):
     yellowstone_result = {"usdPrice": 1.23, "usd_price": 1.23, "source": "yellowstone_grpc_accountSubscribe"}
 
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
-        sell_script, "get_yellowstone_price", return_value=yellowstone_result
+        sell_script, "get_yellowstone_price_cached", return_value=yellowstone_result
     ) as yellowstone_fetch, patch.object(sell_script, "get_token_price") as shyft_fetch:
         result = sell_script.get_sniper_sell_price(PUMP_MINT)
 
@@ -46,7 +52,7 @@ def test_falls_back_to_shyft_when_yellowstone_disabled():
     shyft_result = {"usdPrice": 4.56, "usd_price": 4.56, "source": "shyft_rpc_pumpfun_bonding_curve"}
 
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=False), patch.object(
-        sell_script, "get_yellowstone_price"
+        sell_script, "get_yellowstone_price_cached"
     ) as yellowstone_fetch, patch.object(
         sell_script, "get_token_price", return_value=shyft_result
     ) as shyft_fetch:
@@ -68,7 +74,7 @@ def test_yellowstone_failure_falls_back_to_shyft():
 
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
         sell_script,
-        "get_yellowstone_price",
+        "get_yellowstone_price_cached",
         side_effect=YellowstonePricingError("unavailable"),
     ) as yellowstone_fetch, patch.object(
         sell_script, "get_token_price", return_value=shyft_result
@@ -90,7 +96,7 @@ def test_yellowstone_failure_puts_mint_on_cooldown_skipping_next_call():
     shyft_result = {"usdPrice": 7.89, "usd_price": 7.89, "source": "shyft_rpc_pumpfun_bonding_curve"}
 
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
-        sell_script, "get_yellowstone_price", side_effect=YellowstonePricingError("unavailable"),
+        sell_script, "get_yellowstone_price_cached", side_effect=YellowstonePricingError("unavailable"),
     ) as yellowstone_fetch, patch.object(
         sell_script, "get_token_price", return_value=shyft_result
     ) as shyft_fetch, patch.object(sell_script, "logger", MagicMock()):
@@ -107,7 +113,7 @@ def test_yellowstone_cooldown_is_per_mint():
     shyft_result = {"usdPrice": 1.0, "usd_price": 1.0}
 
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
-        sell_script, "get_yellowstone_price", side_effect=YellowstonePricingError("unavailable"),
+        sell_script, "get_yellowstone_price_cached", side_effect=YellowstonePricingError("unavailable"),
     ) as yellowstone_fetch, patch.object(
         sell_script, "get_token_price", return_value=shyft_result
     ), patch.object(sell_script, "logger", MagicMock()):
@@ -121,7 +127,7 @@ def test_yellowstone_cooldown_expires_and_retries():
     shyft_result = {"usdPrice": 1.0, "usd_price": 1.0}
 
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
-        sell_script, "get_yellowstone_price", side_effect=YellowstonePricingError("unavailable"),
+        sell_script, "get_yellowstone_price_cached", side_effect=YellowstonePricingError("unavailable"),
     ) as yellowstone_fetch, patch.object(
         sell_script, "get_token_price", return_value=shyft_result
     ), patch.object(sell_script, "logger", MagicMock()), patch.object(
@@ -141,7 +147,7 @@ def test_yellowstone_success_clears_a_stale_cooldown_entry():
     sell_script._yellowstone_cooldown[PUMP_MINT] = sell_script.time.monotonic() - 1  # already expired
 
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
-        sell_script, "get_yellowstone_price", return_value=yellowstone_result
+        sell_script, "get_yellowstone_price_cached", return_value=yellowstone_result
     ):
         sell_script.get_sniper_sell_price(PUMP_MINT)
 
@@ -153,10 +159,32 @@ def test_yellowstone_and_shyft_both_failing_propagates():
     except-Exception branch is relied on to skip-and-retry."""
     with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
         sell_script,
-        "get_yellowstone_price",
+        "get_yellowstone_price_cached",
         side_effect=YellowstonePricingError("unavailable"),
     ), patch.object(
         sell_script, "get_token_price", side_effect=RuntimeError("shyft also down")
     ), patch.object(sell_script, "logger", MagicMock()):
         with pytest.raises(RuntimeError):
             sell_script.get_sniper_sell_price(PUMP_MINT)
+
+
+def test_geyser_use_persistent_stream_false_uses_legacy_one_shot_path():
+    """Escape hatch: GEYSER_USE_PERSISTENT_STREAM=false must route through
+    the old get_yellowstone_price() one-shot call, not the cached one, so a
+    deploy can revert to pre-persistent-stream behavior without a code
+    change if the new path ever needs to be backed out."""
+    yellowstone_result = {"usdPrice": 1.23, "usd_price": 1.23, "source": "yellowstone_grpc_accountSubscribe"}
+
+    with patch.object(sell_script, "is_yellowstone_enabled", return_value=True), patch.object(
+        sell_script, "GEYSER_USE_PERSISTENT_STREAM", False
+    ), patch.object(
+        sell_script, "get_yellowstone_price", return_value=yellowstone_result
+    ) as one_shot, patch.object(
+        sell_script, "get_yellowstone_price_cached"
+    ) as cached, patch.object(sell_script, "get_token_price") as shyft_fetch:
+        result = sell_script.get_sniper_sell_price(PUMP_MINT)
+
+    one_shot.assert_called_once_with(PUMP_MINT)
+    cached.assert_not_called()
+    shyft_fetch.assert_not_called()
+    assert result["usdPrice"] == 1.23

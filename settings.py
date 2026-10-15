@@ -203,3 +203,24 @@ GEYSER_PRICE_TIMEOUT_SEC = float(os.getenv("GEYSER_PRICE_TIMEOUT_SEC", "8"))
 # Shyft's RPC read is a live point-in-time read either way, so skipping
 # Yellowstone during the cooldown costs no price freshness.
 SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC", "60"))
+
+# Persistent Yellowstone subscription + in-memory price cache (sell hot
+# path): each open position's mint is RPC-seeded once the moment it's first
+# tracked, then kept current for free by live gRPC pushes, so a price
+# lookup never blocks waiting on the network. Replaces the old per-call
+# subscribe-and-wait (get_yellowstone_price()): that approach could only
+# ever receive a push for a *future* account write, since Yellowstone's
+# snapshot/startup replay happens once at the plugin's own boot, not for a
+# filter a client adds afterward - so a quiet token paid the full
+# GEYSER_PRICE_TIMEOUT_SEC on every single attempt for nothing. Set false to
+# instantly revert to the old subscribe-and-wait behavior, no code change.
+GEYSER_USE_PERSISTENT_STREAM = os.getenv("GEYSER_USE_PERSISTENT_STREAM", "true").lower() == "true"
+# How often the persistent stream re-syncs its tracked-mint set against the
+# currently open positions (new buys get added, closed trades get dropped).
+GEYSER_STREAM_SYNC_SEC = float(os.getenv("GEYSER_STREAM_SYNC_SEC", "5"))
+# Safety net only: a cached price older than this is treated as untrusted
+# and force-reseeded via a direct RPC read, in case a live push was ever
+# silently missed. Under normal operation every tracked mint's cache entry
+# is refreshed well inside this window by live pushes or the reconnect
+# reseed, so this should rarely if ever actually trigger.
+GEYSER_PRICE_CACHE_MAX_AGE_SEC = float(os.getenv("GEYSER_PRICE_CACHE_MAX_AGE_SEC", "30"))

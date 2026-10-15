@@ -431,8 +431,15 @@ def harness(tmp_path):
     h.stream = MagicMock()
     h.db = MagicMock()
     h.app = Flask("test")
+    # GEYSER_USE_PERSISTENT_STREAM forced off regardless of this machine's
+    # real .env: a local dev .env with USE_GEYSER=true (left over from live
+    # Yellowstone testing) would otherwise make every test using this
+    # fixture start a real persistent background thread connecting to a
+    # real remote gRPC endpoint - the same test-pollution risk SellStream
+    # is already mocked out of above.
     with patch.object(sell_script, "BackgroundScheduler", _Scheduler), \
          patch.object(sell_script, "SellStream", h.stream), \
+         patch.object(sell_script, "GEYSER_USE_PERSISTENT_STREAM", False), \
          patch.object(sell_script, "atexit", MagicMock()), \
          patch.object(sell_script, "Trade", trade_model), \
          patch.object(sell_script, "Wallet", wallet_model), \
@@ -752,6 +759,7 @@ def test_scheduler_starts_sell_stream_wired_to_instant_check(harness):
 def test_sell_stream_disabled_by_setting(tmp_path):
     with patch.object(sell_script, "SNIPER_SELL_STREAM", False), \
          patch.object(sell_script, "SellStream") as stream, \
+         patch.object(sell_script, "GEYSER_USE_PERSISTENT_STREAM", False), \
          patch.object(sell_script, "BackgroundScheduler", MagicMock()), \
          patch.object(sell_script, "atexit", MagicMock()):
         sell_script.auto_snipe_auto_sell_schedular(Flask("test"))
