@@ -203,3 +203,12 @@ GEYSER_PRICE_TIMEOUT_SEC = float(os.getenv("GEYSER_PRICE_TIMEOUT_SEC", "8"))
 # Shyft's RPC read is a live point-in-time read either way, so skipping
 # Yellowstone during the cooldown costs no price freshness.
 SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC", "60"))
+
+# Buy-time entry-price reconciliation (autosnipe_buy_new_token.py). Entry
+# price is computed from the confirmed buy transaction's own actual SOL
+# spent / tokens received - not from Geyser and not from Shyft - a few
+# seconds after the buy, so this never delays buy execution. A confirmed
+# transaction's own balance change is a fixed historical fact: reading it
+# 5 seconds or 5 minutes later gives the same answer either way.
+SNIPER_BUY_RECONCILE_INTERVAL_SEC = float(os.getenv("SNIPER_BUY_RECONCILE_INTERVAL_SEC", "5"))
+SNIPER_BUY_RECONCILE_TIMEOUT_SEC = float(os.getenv("SNIPER_BUY_RECONCILE_TIMEOUT_SEC", "90"))

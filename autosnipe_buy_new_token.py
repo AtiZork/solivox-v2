@@ -1,6 +1,8 @@
 import os
+import struct
 import time
 import logging
+from datetime import datetime
 from models import db, Wallet, Trade, TradeHistory, AutoSnipeConfig, TradeLog
 import requests
 import base64
@@ -12,8 +14,16 @@ from solana.rpc.core import RPCException
 from solana.rpc.types import TxOpts
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
-from settings import solana_client, SNIPER_USE_WEBSOCKET, SNIPER_HTTP_FALLBACK
-from shyft_pricing import get_token_price
+from solders.signature import Signature
+from solders.transaction_status import TransactionConfirmationStatus
+from settings import (
+    solana_client,
+    SNIPER_USE_WEBSOCKET,
+    SNIPER_HTTP_FALLBACK,
+    SNIPER_BUY_RECONCILE_INTERVAL_SEC,
+    SNIPER_BUY_RECONCILE_TIMEOUT_SEC,
+)
+from shyft_pricing import get_token_price, get_shyft_pricing_service
 from solders.pubkey import Pubkey
 from latency_log import StageTimer
 
@@ -60,6 +70,35 @@ API_BASE_URL = "https://api.jup.ag" if API_KEY else "https://lite-api.jup.ag"
 headers = {"x-api-key": API_KEY} if API_KEY else {}
 # SPL Token Program ID
 SPL_TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+
+# Pyth SOL/USD price feed account (mainnet-beta). Read directly via our own
+# solana_client - a plain point-in-time getAccountInfo, not a subscription,
+# so none of Yellowstone/Geyser's "must wait for a live push" unreliability
+# applies, and it doesn't go through Shyft's RPC either. Used only for the
+# buy-time entry-price calculation; sell-side pricing is untouched.
+PYTH_SOL_USD_PRICE_FEED = Pubkey.from_string("7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE")
+
+
+def get_sol_usd_rate() -> float | None:
+    """
+    Direct, first-party SOL/USD rate for the entry-price calculation: reads
+    Pyth's SOL/USD account once via solana_client. Returns None (never
+    raises) on any failure, so callers can fall back safely without
+    crashing the buy or the reconciliation job.
+    """
+    try:
+        resp = solana_client.get_account_info(PYTH_SOL_USD_PRICE_FEED, commitment=Confirmed)
+        raw = resp.value.data if resp.value else None
+    except Exception as exc:
+        logger.warning(f"SOL/USD Pyth read failed: {exc}")
+        return None
+    if not raw or len(raw) < 93:
+        return None
+    price_data = struct.unpack_from("<q", raw, 73)[0]
+    exponent = struct.unpack_from("<i", raw, 89)[0]
+    value = float(price_data) * (10.0 ** float(exponent))
+    return value if value > 0 else None
+
 
 from threading import Lock
 
@@ -449,11 +488,27 @@ def _buy_token_internal(token_address, config, timer=None):
         to_pubkey = wallet.public_key
 
         amount = buy_amount_sol # Amount in SOL to spend
-        with timer.stage("price"):
-            current_token_price_data = get_token_price(token_address)
-        current_token_price = current_token_price_data["usdPrice"]
-        token_name = current_token_price_data["name"]
-        token_symbol = current_token_price_data["symbol"]
+
+        # Token name/symbol only - metadata, not pricing (Shyft REST with an
+        # on-chain Metaplex fallback already built into get_token_details).
+        with timer.stage("token_details"):
+            try:
+                token_details = get_shyft_pricing_service().get_token_details(token_address)
+                token_name = token_details.get("name") or "Unknown"
+                token_symbol = token_details.get("symbol") or "UNKNOWN"
+            except Exception as exc:
+                logger.warning(f"Token details lookup failed for {token_address}: {exc}")
+                token_name = "Unknown"
+                token_symbol = "UNKNOWN"
+
+        # Entry price is NOT fetched here - no Geyser, no Shyft, no live
+        # price of any kind on the buy's hot path. It's a placeholder
+        # (autosnipe_sell_logic treats initial_price<=0 as "nothing to
+        # evaluate yet", so this is always safe) until
+        # reconcile_pending_buys() computes the real one from the confirmed
+        # transaction's actual SOL spent / tokens received, a few seconds
+        # after this function returns. See that function for why.
+        current_token_price = 0.0
         estimated_tokens = 0 # Will be updated after quote
 
 
@@ -559,7 +614,7 @@ def _buy_token_internal(token_address, config, timer=None):
             execution_time_ms = (end_time - start_time) * 1000
             signature = str(rpc_response.value)
             timer.fields["sig"] = signature
-            print(f"✅ Auto trade job executed in {execution_time_ms:.2f} ms!")
+            print(f"Auto trade job executed in {execution_time_ms:.2f} ms!")
             print(f"Transaction sent successfully! Signature: {signature}")
             print(f"View transaction on Solscan: https://solscan.io/tx/{signature}")
 
@@ -616,7 +671,12 @@ def _buy_token_internal(token_address, config, timer=None):
             db.session.add(new_trade)
             db.session.commit()
 
-            # Record in TradeHistory
+            # Record in TradeHistory. status="sent" (rather than the column's
+            # default "confirmed") marks this row as awaiting
+            # reconcile_pending_buys(), which confirms the transaction and
+            # fills in the real execution_price/Trade.initial_price -
+            # mirrors how the sell flow's own reconcile_pending_sells()
+            # already uses this same column.
             executed_trade = TradeHistory(
                 trade_id=new_trade.id,
                 token_address=token_address,
@@ -624,7 +684,8 @@ def _buy_token_internal(token_address, config, timer=None):
                 trade_kind="AUTOSNIPE", # Consistent with Trade table
                 amount=amount, # Amount of SOL spent
                 execution_price=current_token_price,
-                tx_id=signature
+                tx_id=signature,
+                status="sent",
             )
             db.session.add(executed_trade)
             db.session.commit()
@@ -852,6 +913,226 @@ def _start_http_fallback_scheduler():
     print("[HTTP Fallback] Detector scheduler running (every 5s).")
 
 
+# --- Buy-time entry-price reconciliation ------------------------------------
+#
+# buy_token() records a *placeholder* initial_price=0.0 (no Geyser, no Shyft,
+# no live price of any kind - zero added latency). This fills it in, a few
+# seconds later, from the confirmed transaction's own actual token-balance
+# change - a fixed historical fact, unlike a live price which keeps moving
+# every time you check it, so this is accurate no matter how quickly or
+# slowly the job happens to run.
+
+
+def _actual_tokens_received(tx_data, mint: str, owner_pubkey: str):
+    """Our wallet's real token-balance change in a specific confirmed
+    transaction (post - pre, for this mint/owner pair)."""
+    try:
+        meta = tx_data.transaction.meta
+        post_balances = meta.post_token_balances or []
+        pre_balances = meta.pre_token_balances or []
+    except AttributeError:
+        return None
+
+    mint_pk = Pubkey.from_string(mint)
+    owner_pk = Pubkey.from_string(owner_pubkey)
+
+    post_bal = next((b for b in post_balances if b.mint == mint_pk and b.owner == owner_pk), None)
+    if post_bal is None:
+        return None
+    post_amount = post_bal.ui_token_amount.ui_amount or 0.0
+
+    pre_bal = next((b for b in pre_balances if b.mint == mint_pk and b.owner == owner_pk), None)
+    pre_amount = (pre_bal.ui_token_amount.ui_amount or 0.0) if pre_bal else 0.0
+
+    received = post_amount - pre_amount
+    return received if received > 0 else None
+
+
+def _apply_buy_price_reconciliation(trade, sol_spent: float, actual_tokens: float) -> None:
+    """
+    Sets Trade.initial_price (and purchased_token_amount/
+    initial_token_amount, if nothing has sold from the position yet) from
+    (sol_spent * SOL/USD rate) / actual_tokens - sol_spent and actual_tokens
+    both come from real execution data (config + confirmed transaction);
+    only the SOL/USD rate is a fresh read, and that figure is comparatively
+    stable second to second (unlike a specific token's own price), so it
+    isn't the source of inaccuracy a correction needs to guard against.
+    """
+    if trade.executed:
+        return  # position already closed; nothing left to correct
+
+    sol_usd_rate = get_sol_usd_rate()
+    if sol_usd_rate and sol_usd_rate > 0 and actual_tokens > 0:
+        trade.initial_price = (sol_spent * sol_usd_rate) / actual_tokens
+    else:
+        logger.warning(
+            f"[BuyReconcile] SOL/USD rate unavailable for trade {trade.id}; "
+            "leaving initial_price at its placeholder value."
+        )
+
+    if not trade.tp_pct_sold:
+        # No partial sell has touched this position yet - safe to correct
+        # the recorded quantity too. If a partial sell already happened
+        # (against the old quote-based estimate), leave quantities alone -
+        # quantity bookkeeping belongs to the sell flow once it has started
+        # acting on a trade; only the price is corrected in that case.
+        trade.purchased_token_amount = actual_tokens
+        trade.initial_token_amount = actual_tokens
+
+
+def reconcile_pending_buys(app) -> None:
+    """
+    Resolve every "sent" buy to its actual on-chain outcome and compute the
+    real entry price/quantity from what the confirmed transaction actually
+    delivered. Mirrors the sell flow's own reconcile_pending_sells() (same
+    TradeHistory.status states, same bounded timeout), but fills in pricing
+    rather than restoring a position - a buy transaction that failed/never
+    confirmed is left with its placeholder price rather than being closed
+    out, since reversing a buy's on-chain effects is outside the scope of a
+    pricing fix.
+
+    Runs as its own periodic job, separate from buy execution, so this
+    never adds latency to a snipe buy.
+    """
+    with app.app_context():
+        try:
+            pending = TradeHistory.query.filter_by(status="sent", trade_type="BUY").all()
+        except Exception as e:
+            logger.warning(f"[BuyReconcile] could not load pending buys: {e}")
+            return
+        if not pending:
+            return
+
+        for history in pending:
+            age_sec = (
+                (datetime.utcnow() - history.timestamp).total_seconds() if history.timestamp else 0.0
+            )
+            try:
+                # search_transaction_history=True: without it, the RPC node
+                # only answers from its short-lived recent-status cache and
+                # returns None for anything that's aged out of it (a couple
+                # of minutes), even when the transaction actually finalized
+                # - which would otherwise eventually mislabel a successful
+                # buy as failed_timeout.
+                resp = solana_client.get_signature_statuses(
+                    [Signature.from_string(history.tx_id)], search_transaction_history=True
+                )
+                status = (resp.value or [None])[0]
+            except Exception as e:
+                logger.warning(f"[BuyReconcile] get_signature_statuses failed for {history.tx_id}: {e}")
+                continue
+
+            if status is None:
+                if age_sec >= SNIPER_BUY_RECONCILE_TIMEOUT_SEC:
+                    history.status = "failed_timeout"
+                    db.session.commit()
+                    logger.warning(
+                        f"[BuyReconcile] buy tx {history.tx_id} for trade {history.trade_id} "
+                        f"never confirmed within {SNIPER_BUY_RECONCILE_TIMEOUT_SEC:.0f}s; "
+                        "leaving the placeholder entry price in place."
+                    )
+                continue
+
+            if status.err is not None:
+                history.status = "failed"
+                db.session.commit()
+                logger.warning(
+                    f"[BuyReconcile] buy tx {history.tx_id} for trade {history.trade_id} "
+                    "failed on-chain; leaving the placeholder entry price in place "
+                    "(this job only fills in pricing, it does not close/restore the position)."
+                )
+                continue
+
+            if status.confirmation_status not in (
+                TransactionConfirmationStatus.Confirmed,
+                TransactionConfirmationStatus.Finalized,
+            ):
+                if age_sec >= SNIPER_BUY_RECONCILE_TIMEOUT_SEC:
+                    history.status = "failed_timeout"
+                    db.session.commit()
+                continue
+
+            trade = Trade.query.get(history.trade_id) if history.trade_id else None
+            if trade is None:
+                history.status = "confirmed"
+                db.session.commit()
+                continue
+
+            try:
+                tx_response = solana_client.get_transaction(
+                    Signature.from_string(history.tx_id), encoding='jsonParsed',
+                    max_supported_transaction_version=0,
+                )
+                tx_data = tx_response.value
+            except Exception as e:
+                logger.warning(f"[BuyReconcile] get_transaction failed for {history.tx_id}: {e}")
+                continue
+            if not tx_data:
+                continue
+
+            actual_tokens = _actual_tokens_received(tx_data, trade.token_address, trade.to_pubkey)
+            if actual_tokens is None:
+                # get_signature_statuses reporting "confirmed" can transiently
+                # race ahead of get_transaction actually returning complete
+                # balance data for that same signature - retry on later
+                # cycles rather than giving up on the first miss, exactly
+                # like the "not yet Confirmed/Finalized" case above. Only
+                # give up once the bounded timeout is reached.
+                if age_sec >= SNIPER_BUY_RECONCILE_TIMEOUT_SEC:
+                    logger.warning(
+                        f"[BuyReconcile] could not parse actual tokens received for trade {trade.id} "
+                        f"(tx {history.tx_id}) within {SNIPER_BUY_RECONCILE_TIMEOUT_SEC:.0f}s; "
+                        "leaving the placeholder entry price in place."
+                    )
+                    history.status = "confirmed"
+                    db.session.commit()
+                continue
+
+            try:
+                db.session.refresh(trade)
+            except Exception as e:
+                logger.warning(f"[BuyReconcile] could not refresh trade {trade.id}: {e}")
+                continue
+
+            _apply_buy_price_reconciliation(trade, history.amount, actual_tokens)
+            history.status = "confirmed"
+            history.execution_price = trade.initial_price
+            try:
+                db.session.commit()
+            except Exception as e:
+                logger.error(f"[BuyReconcile] failed to save corrected price for trade {trade.id}: {e}")
+                db.session.rollback()
+                continue
+
+            logger.info(
+                f"[BuyReconcile] trade {trade.id} ({trade.token_address}): entry price set to "
+                f"{trade.initial_price} using actual {actual_tokens} tokens received "
+                f"(tx {history.tx_id})."
+            )
+
+
+_buy_reconcile_scheduler = None
+
+
+def start_buy_reconciliation_scheduler() -> None:
+    """Starts the buy-time entry-price reconciliation job. Runs
+    unconditionally once Sniper ingestion starts, independent of whether
+    detection is on the WebSocket or HTTP-fallback path."""
+    global _buy_reconcile_scheduler
+    if _buy_reconcile_scheduler is not None:
+        return
+    from main import app
+
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(
+        lambda: reconcile_pending_buys(app), "interval", seconds=SNIPER_BUY_RECONCILE_INTERVAL_SEC
+    )
+    scheduler.start()
+    atexit.register(lambda: scheduler.shutdown(wait=False))
+    _buy_reconcile_scheduler = scheduler
+    print(f"[BuyReconcile] scheduler running (every {SNIPER_BUY_RECONCILE_INTERVAL_SEC:.0f}s).")
+
+
 def start_sniper_ingestion():
     """
     Start WebSocket ingestion (Phase 1) or HTTP polling fallback.
@@ -861,6 +1142,8 @@ def start_sniper_ingestion():
     if _ingestion_started:
         return
     _ingestion_started = True
+
+    start_buy_reconciliation_scheduler()
 
     if SNIPER_USE_WEBSOCKET:
         try:

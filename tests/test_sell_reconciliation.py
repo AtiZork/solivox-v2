@@ -53,7 +53,10 @@ def harness():
 
     history_model = MagicMock()
     history_model.query.filter_by.side_effect = lambda **kw: SimpleNamespace(
-        all=lambda: [r for r in h.history_rows if r.status == kw.get("status")]
+        all=lambda: [
+            r for r in h.history_rows
+            if r.status == kw.get("status") and r.trade_type == kw.get("trade_type")
+        ]
     )
     trade_model = MagicMock()
     trade_model.query.get.side_effect = lambda tid: h.trades.get(tid)
@@ -236,6 +239,22 @@ def test_multiple_pending_sells_each_resolved_independently(harness):
     assert failed.status == "failed"
     assert harness.trades[2].executed is False
     assert harness.trades[2].purchased_token_amount == pytest.approx(20.0)
+
+
+def test_buy_rows_awaiting_their_own_reconciliation_are_never_touched(harness):
+    """Regression: a BUY row sitting at status="sent" (awaiting
+    autosnipe_buy_new_token.py's own reconcile_pending_buys) must never be
+    picked up here - this job has no concept of an entry price, so it would
+    mark the row "confirmed" without ever computing one, permanently
+    stranding Trade.initial_price at its placeholder."""
+    buy_row = _history(trade_id=5, tx_id="sigBuy", trade_type="BUY")
+    harness.history_rows = [buy_row]
+    harness.trades = {5: _trade(id=5)}
+    harness.statuses = {"sigBuy": _status(confirmation_status=TransactionConfirmationStatus.Confirmed)}
+
+    sell_script.reconcile_pending_sells(harness.app)
+
+    assert buy_row.status == "sent"  # never touched - not a SELL row
 
 
 def test_scheduler_wires_reconcile_job_without_disturbing_sell_cycle_job():

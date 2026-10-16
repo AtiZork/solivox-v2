@@ -119,6 +119,9 @@ def harness(tmp_path):
          patch.object(buy, "db", MagicMock()), \
          patch.object(buy, "VersionedTransaction", _FakeVersionedTx), \
          patch.object(buy, "get_token_price", return_value={"usdPrice": 1e-6, "name": "N", "symbol": "S"}), \
+         patch.object(buy, "get_shyft_pricing_service", return_value=MagicMock(
+             get_token_details=MagicMock(return_value={"name": "N", "symbol": "S"})
+         )), \
          patch.object(buy, "logger", h.logger), \
          patch("latency_log.logger", h.latency):
         yield h
@@ -220,7 +223,7 @@ def test_latency_line_has_every_stage(harness):
     line = _latency_lines(harness)[0]
     assert line.startswith("[latency] path=buy")
     assert f"mint={MINT}" in line and "outcome=sent" in line and "sig=sig1" in line
-    for stage in ("decision=1234.5", "lock_wait=", "price=", "balance=", "quote=", "swap=", "send=", "db=", "total="):
+    for stage in ("decision=1234.5", "lock_wait=", "token_details=", "balance=", "quote=", "swap=", "send=", "db=", "total="):
         assert stage in line, stage
 
 

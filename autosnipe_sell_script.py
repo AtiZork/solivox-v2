@@ -757,7 +757,14 @@ def reconcile_pending_sells(app) -> None:
     """
     with app.app_context():
         try:
-            pending = TradeHistory.query.filter_by(status="sent").all()
+            # trade_type="SELL": without this, a BUY row sitting at
+            # status="sent" (awaiting autosnipe_buy_new_token.py's own
+            # reconcile_pending_buys) is also visible here. This job would
+            # then race it, see the same signature confirmed, and mark the
+            # row "confirmed" on the buy's behalf - correctly for a sell,
+            # but for a buy it skips ever computing/saving the real entry
+            # price, since this job has no concept of one.
+            pending = TradeHistory.query.filter_by(status="sent", trade_type="SELL").all()
         except Exception as e:
             logger.warning(f"[Reconcile] could not load pending sells: {e}")
             return
