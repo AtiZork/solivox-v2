@@ -363,6 +363,7 @@ def should_buy_token(token_address, user_id, config):
         if is_ws_active():
             start_time = time.time()
             last_qualifying = 0
+            stats = {}  # guards the NOT-MET log line below if check_duration <= 0
             while time.time() - start_time < check_duration:
                 stats = get_mint_buy_stats(token_address, config.buy_txns_over_80_usd)
                 last_qualifying = stats["qualifying_count"]
@@ -394,7 +395,11 @@ def should_buy_token(token_address, user_id, config):
                         return True
                     time.sleep(0.2)
 
-            print(f"[Buy Condition][WS] Buy conditions NOT MET for {token_address} within scan window.")
+            print(
+                f"[Buy Condition][WS] Buy conditions NOT MET for {token_address} within scan window. "
+                f"(candidate txns seen={stats.get('candidates_seen', 0)}, "
+                f"excluded={stats.get('candidates_excluded', 0)} [sell/failed/unresolved])"
+            )
             return False
     except ImportError:
         pass

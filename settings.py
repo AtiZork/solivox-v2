@@ -73,6 +73,16 @@ SNIPER_RPC_MIN_INTERVAL_SEC = max(0.0, float(os.getenv("SNIPER_RPC_MIN_INTERVAL_
 # longer-lived buy-condition-check + buy-execution callback per new token.
 SNIPER_EVENT_POOL_SIZE = int(os.getenv("SNIPER_EVENT_POOL_SIZE", "50"))
 SNIPER_DECISION_POOL_SIZE = int(os.getenv("SNIPER_DECISION_POOL_SIZE", "20"))
+# Once a single mint has accumulated this many raw swap-marker candidates
+# (counted or excluded - before any USD filtering), stop spending further
+# get_transaction calls resolving more of them for that mint. A mint this
+# active has already produced far more evidence than any realistic
+# min_txns threshold needs; without this cap, one high-volume token can
+# saturate the shared RPC throttle/event pool and delay Create-detection
+# and buy-counting for every other mint (measured live: buy_ws_to_counted
+# and launch_ws_to_registered both spiked from ~150-300ms to multi-second
+# during a burst on one hot mint before this cap was added).
+SNIPER_MAX_BUY_CANDIDATES_PER_MINT = int(os.getenv("SNIPER_MAX_BUY_CANDIDATES_PER_MINT", "200"))
 # Concurrent price fetches per sniper sell cycle. Sells themselves stay
 # sequential; raise with care, Shyft RPC/gRPC rate limits apply.
 SNIPER_SELL_PRICE_WORKERS = int(os.getenv("SNIPER_SELL_PRICE_WORKERS", "10"))

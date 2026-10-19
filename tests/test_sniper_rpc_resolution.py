@@ -92,7 +92,8 @@ def test_real_version_1_buy_tx_resolves_mint_and_sol(stats):
     client = MagicMock()
     client.get_transaction.return_value = resp
     with patch.object(ss, "solana_client", client), patch.object(ss, "_RPC_MIN_INTERVAL_SEC", 0):
-        mint, sol = ss._extract_mint_and_sol_from_buy_tx(FIXTURE_SIG)
+        mint = ss._mint_from_tx_value(ss._get_transaction_with_retry(FIXTURE_SIG))
+        sol = ss._resolve_buy_amount(FIXTURE_MINT, FIXTURE_SIG)
     assert mint == FIXTURE_MINT
     assert sol == pytest.approx(0.044938377)
 
@@ -143,10 +144,11 @@ def test_submit_logged_records_queue_wait(stats):
 
 
 def test_buy_count_lag_is_recorded(stats, no_sleep):
-    with patch.object(ss, "_extract_mint_and_sol_from_buy_tx", return_value=(FIXTURE_MINT, 1.0)), \
+    with patch.object(ss, "_resolve_buy_amount", return_value=1.0), \
          patch.object(ss, "_get_sol_usd_price", return_value=150.0), \
          patch.object(ss, "stream_state") as state:
         state.mark_signature_seen.return_value = True
+        state.over_candidate_ceiling.return_value = False
         state.get_buy_stats.return_value = {"total_buys": 1}
         ss._process_mint_buy(FIXTURE_MINT, "sig-a", ["Program log: Instruction: Buy"], time.monotonic() - 0.2)
     count, _total, peak = stats.snapshot()["durations"]["buy_ws_to_counted"]

@@ -28,6 +28,7 @@ from settings import (
     SNIPER_DECISION_POOL_SIZE,
     SNIPER_EVENT_POOL_SIZE,
     SNIPER_HTTP_FALLBACK,
+    SNIPER_MAX_BUY_CANDIDATES_PER_MINT,
     SNIPER_MINT_TRACKING_TTL_SEC,
     SNIPER_RPC_MIN_INTERVAL_SEC,
     SNIPER_USE_WEBSOCKET,
@@ -96,6 +97,12 @@ class MintTracker:
     launch_time: float
     create_signature: str
     buys: list[BuyEvent] = field(default_factory=list)
+    # Every swap-marker-matched candidate seen for this mint, and how many
+    # were excluded (sell/failed/unresolved/no-cost-found) rather than
+    # counted - lets a "not met" decision distinguish genuinely low volume
+    # from a detection gap (see note_candidate / get_buy_stats).
+    candidates_seen: int = 0
+    candidates_excluded: int = 0
 
 
 class SniperStreamState:
@@ -169,6 +176,27 @@ class SniperStreamState:
             tracker.buys.append(buy)
             self.buys_detected += 1
 
+    def note_candidate(self, mint: str, counted: bool) -> None:
+        """Record one swap-marker-matched transaction evaluated for this
+        mint, and whether it ended up counted as a buy or excluded (sell,
+        failed on-chain, unresolved, or no identifiable cost)."""
+        with self._lock:
+            tracker = self.mint_registry.get(mint)
+            if tracker is None:
+                return
+            tracker.candidates_seen += 1
+            if not counted:
+                tracker.candidates_excluded += 1
+
+    def over_candidate_ceiling(self, mint: str, ceiling: int) -> bool:
+        """True once a mint has accumulated >= ceiling raw candidates - it
+        has already produced far more evidence than any realistic
+        min_txns threshold needs, so further RPC resolution for it is pure
+        overhead that can starve other mints' detection."""
+        with self._lock:
+            tracker = self.mint_registry.get(mint)
+            return tracker is not None and tracker.candidates_seen >= ceiling
+
     def get_buy_stats(self, mint: str, min_usd_value: float) -> dict:
         with self._lock:
             tracker = self.mint_registry.get(mint)
@@ -178,6 +206,8 @@ class SniperStreamState:
                     "qualifying_count": 0,
                     "launch_time": None,
                     "qualifying_buys": [],
+                    "candidates_seen": 0,
+                    "candidates_excluded": 0,
                 }
             qualifying = [b for b in tracker.buys if b.usd_value >= min_usd_value]
             return {
@@ -185,6 +215,8 @@ class SniperStreamState:
                 "qualifying_count": len(qualifying),
                 "launch_time": tracker.launch_time,
                 "qualifying_buys": qualifying,
+                "candidates_seen": tracker.candidates_seen,
+                "candidates_excluded": tracker.candidates_excluded,
             }
 
     def note_message(self) -> None:
@@ -328,12 +360,23 @@ def _get_transaction_with_retry(signature: str, *, max_attempts: int = 5):
     return None
 
 
+def _account_key_str(key) -> str:
+    """
+    account_keys entries are plain Pubkey for "base64"/default-encoded
+    transactions, but a ParsedAccount wrapper (pubkey/writable/signer/source)
+    for "jsonParsed" responses - str() on the wrapper gives its debug repr,
+    not the address, so any comparison against it silently never matches.
+    """
+    pubkey = getattr(key, "pubkey", key)
+    return str(pubkey)
+
+
 def _mint_from_tx_value(tx) -> Optional[str]:
     if tx is None:
         return None
     account_keys = tx.transaction.transaction.message.account_keys
     for key in account_keys:
-        addr = str(key)
+        addr = _account_key_str(key)
         if addr.endswith("pump"):
             return addr
     meta = tx.transaction.meta
@@ -360,20 +403,96 @@ def _extract_mint_from_create_tx(signature: str) -> Optional[str]:
     return _mint_from_tx_value(tx)
 
 
-def _extract_mint_and_sol_from_buy_tx(signature: str) -> tuple[Optional[str], float]:
-    """Event-driven RPC: resolve mint and SOL spent for a Pump.fun buy."""
-    tx = _get_transaction_with_retry(signature, max_attempts=3)
-    if tx is None or tx.transaction.meta is None:
-        return None, 0.0
+# Markers that gate an RPC lookup at all (cheap, no-RPC check on the WS log
+# lines). "Instruction: Buy" is Pump.fun's own bonding-curve program;
+# "Instruction: Swap" is the generic name used by Jupiter, Orca, Raydium and
+# most other routers/AMMs - direction (buy vs sell) is NOT determined from
+# this text, only whether it's worth the RPC call to check.
+_SWAP_LOG_MARKERS = ("Instruction: Buy", "Instruction: Swap")
 
-    mint = _mint_from_tx_value(tx)
+
+def _net_mint_delta(meta, owner: str, target_mint: str) -> float:
+    """
+    Net (post - pre) balance change of target_mint for owner, summed across
+    every token account they hold for it - a wallet can have more than one
+    account for the same mint.
+    """
+    pre = sum(
+        (b.ui_token_amount.ui_amount or 0.0)
+        for b in (meta.pre_token_balances or [])
+        if str(b.owner) == owner and str(b.mint) == target_mint
+    )
+    post = sum(
+        (b.ui_token_amount.ui_amount or 0.0)
+        for b in (meta.post_token_balances or [])
+        if str(b.owner) == owner and str(b.mint) == target_mint
+    )
+    return post - pre
+
+
+def _resolve_signer_buy(tx, mint: str) -> Optional[float]:
+    """
+    SOL-equivalent amount spent if this transaction is the signer genuinely
+    acquiring `mint` - regardless of which program/instruction actually
+    executed the trade (direct Pump.fun buy, Jupiter/Orca/Raydium-routed
+    swap, multi-hop route, etc.). Never guesses from instruction names:
+    direction is read from the transaction's own balance changes.
+
+    Returns None (and records why, for non-tx-unavailable cases - that one
+    is already counted by _get_transaction_with_retry) for: an
+    unresolved/unavailable transaction, a failed transaction, a transaction
+    where the signer did not net-gain the target mint (a sell, or simply
+    unrelated activity mentioning the mint), or one where a gain was found
+    but no corresponding SOL/WSOL cost could be identified (deliberately
+    conservative - never counted on a guess).
+    """
+    if tx is None:
+        return None
     meta = tx.transaction.meta
+    if meta is None:
+        return None
+    if meta.err is not None:
+        rpc_stats.count("buy_excluded_failed_onchain")
+        return None
+
+    account_keys = tx.transaction.transaction.message.account_keys
+    if not account_keys:
+        return None
+    signer = _account_key_str(account_keys[0])
+
+    if _net_mint_delta(meta, signer, mint) <= 0:
+        # Signer's holding of the target mint didn't increase - this is a
+        # sell, or a transaction that merely mentions the mint without the
+        # signer acquiring it. Correctly excluded either way.
+        rpc_stats.count("buy_excluded_not_signer_gain")
+        return None
+
+    # Prefer the wrapped-SOL delta when present: aggregator routes commonly
+    # wrap native SOL into a WSOL token account before swapping, so the
+    # native lamport delta alone can miss the real cost (or double-count it
+    # if naively summed with the wrap step itself). Only fall back to
+    # native SOL when no WSOL movement was involved - the direct Pump.fun
+    # bonding-curve case.
+    wsol_spent = -_net_mint_delta(meta, signer, WSOL_MINT)
+    if wsol_spent > 1e-6:
+        return wsol_spent
+
     sol_spent = 0.0
     if meta.pre_balances and meta.post_balances and len(meta.pre_balances) > 0:
         lamport_delta = meta.pre_balances[0] - meta.post_balances[0]
         if lamport_delta > 0:
             sol_spent = lamport_delta / 1_000_000_000
-    return mint, sol_spent
+    if sol_spent <= 0:
+        rpc_stats.count("buy_excluded_no_cost_found")
+        return None
+    return sol_spent
+
+
+def _resolve_buy_amount(mint: str, signature: str) -> Optional[float]:
+    """Event-driven RPC: resolve SOL spent for a genuine buy of `mint` by
+    this transaction's signer, regardless of routing."""
+    tx = _get_transaction_with_retry(signature, max_attempts=3)
+    return _resolve_signer_buy(tx, mint)
 
 
 def _process_create(signature: str, logs: list, received_at: Optional[float] = None) -> None:
@@ -423,13 +542,20 @@ def _request_mint_subscription(mint: str) -> None:
 
 
 def _process_mint_buy(mint: str, signature: str, logs: list, received_at: Optional[float] = None) -> None:
-    if not _logs_contain(logs, "Instruction: Buy"):
+    if not any(_logs_contain(logs, marker) for marker in _SWAP_LOG_MARKERS):
         return
     if not stream_state.mark_signature_seen(signature):
         return
+    if stream_state.over_candidate_ceiling(mint, SNIPER_MAX_BUY_CANDIDATES_PER_MINT):
+        # This mint has already produced overwhelming evidence of volume -
+        # skip the RPC call entirely rather than let one hot token starve
+        # the shared throttle/pool that every other mint's detection relies on.
+        rpc_stats.count("buy_skipped_candidate_ceiling")
+        return
 
-    _, sol_amount = _extract_mint_and_sol_from_buy_tx(signature)
-    if sol_amount <= 0:
+    sol_amount = _resolve_buy_amount(mint, signature)
+    stream_state.note_candidate(mint, counted=sol_amount is not None)
+    if sol_amount is None:
         rpc_stats.count("buy_not_counted")
         return
     if received_at:
