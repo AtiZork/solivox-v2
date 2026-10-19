@@ -1,3 +1,9 @@
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 function formatNumber(value) {
   if (value >= 1_000_000_000) return (value / 1_000_000_000).toFixed(1) + "B";
   if (value >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
@@ -12,7 +18,11 @@ function formatNumber(value) {
 
   socket.on("connect", () => {
     console.log("✅ Connected");
-    socket.emit("subscribe_trades");
+    socket.emit("subscribe_trades", { token: localStorage.getItem("token") });
+  });
+
+  socket.on("trades_error", (err) => {
+    console.error("Trade subscription error:", err && err.message);
   });
 
   socket.on("trades_data", (trades) => {
@@ -40,7 +50,7 @@ function formatNumber(value) {
           <div class="d-flex justify-content-between">
             <div>
               <div class="token-info">
-                <div><span class="token-name">${trade.token_name}</span></div>
+                <div><span class="token-name">${escapeHtml(trade.token_name)}</span></div>
               </div>
               <div class="d-flex">Token Address: <span class="address-value">${tokenId}</span>
                 <button class="copy-btn" style="margin-left: 10px">
@@ -404,7 +414,10 @@ function formatNumber(value) {
 
     fetch(`/trade/${tradeId}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${localStorage.getItem("token")}`,
+      },
       body: JSON.stringify(requestData),
     })
       .then(res => res.json())
@@ -498,7 +511,10 @@ function formatNumber(value) {
       }
       fetch("/sell_token/" + id +'/', {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${localStorage.getItem("token")}`,
+        },
         body: JSON.stringify({ tokenAddress, sell_amount: parseFloat(amount), sell_percent:0 })
       });
     }
@@ -509,7 +525,10 @@ function formatNumber(value) {
 
     fetch(`/api/update_auto_sell/${tradeId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${localStorage.getItem("token")}`,
+      },
       body: JSON.stringify({ auto_sell: newState })
     }).then(res => {
       if (res.ok) {
@@ -533,7 +552,10 @@ function formatNumber(value) {
 
       fetch("/buy_token/" + id +'/', {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${localStorage.getItem("token")}`,
+        },
         body: JSON.stringify({ tokenAddress, amount: parseFloat(amount) })
       });
     }
@@ -545,7 +567,10 @@ function formatNumber(value) {
 
       fetch("/sell_token/" + id +'/', {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${localStorage.getItem("token")}`,
+        },
         body: JSON.stringify({tokenAddress, sell_percent: parseFloat(percent), sell_amount:0  // ✅ convert to number and rename key to match backend
 })
         // body: JSON.stringify({ tokenAddress, percent })
@@ -587,7 +612,9 @@ function formatNumber(value) {
 
     tbody.innerHTML = '<tr><td colspan="5">Loading...</td></tr>';
 
-    fetch(`/trade_history/${tradeId}`)
+    fetch(`/trade_history/${tradeId}`, {
+      headers: { "Authorization": `Bearer ${localStorage.getItem("token")}` },
+    })
     // fetch(`/trade_history/180`)
       .then(res => {
         if (!res.ok) throw new Error('API error');

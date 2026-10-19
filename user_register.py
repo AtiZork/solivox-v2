@@ -34,11 +34,10 @@ def login():
             return jsonify({"msg": "wrong username or password"}), 401
         expires = datetime.timedelta(days=1)
         access_token = create_access_token(identity=str(user.id), expires_delta=expires)
-        print(access_token)
         return jsonify(access_token=access_token), 200
     except Exception as e:
         print(f"Error during login: {e}")
-        return jsonify({"message":e}), 500
+        return jsonify({"message": str(e)}), 500
 
 @user_register_bp.route('/user', methods=['GET'])
 @jwt_required()

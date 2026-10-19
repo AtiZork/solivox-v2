@@ -74,7 +74,7 @@ def buy_token_trade():
         long_sell_gas_fee = data.get("sell_gas_fee") if data.get("sell_gas_fee") else 0.01
         if buy_now is True:
 
-            wallet = Wallet.query.filter_by(public_key=to_pubkey).first()
+            wallet = Wallet.query.filter_by(public_key=to_pubkey, user_id=user_id).first()
             if not wallet:
                 return jsonify({"status": "failed", "message": "Failed to fetch wallet"}), 400
 
@@ -333,15 +333,18 @@ update trade api
 
 
 @solana_bp.route('/trade/<int:trade_id>/', methods=['PUT'])
+@jwt_required()
 def update_trade(trade_id):
     """Update an existing trade's conditions."""
     try:
+        user_id = get_jwt_identity()
         data = request.json
         if not trade_id:
             return jsonify({"status": "failed", "message": "Missing trade_id"}), 400
 
-        # Fetch trade from DB
-        trade = Trade.query.filter_by(id=trade_id).first()
+        # Fetch trade from DB, scoped to the caller - otherwise any
+        # authenticated user could edit another user's stop-loss/slippage.
+        trade = Trade.query.filter_by(id=trade_id, user_id=user_id).first()
         if not trade:
             return jsonify({"status": "failed", "message": "Trade not found"}), 404
 
@@ -412,8 +415,12 @@ def update_trade(trade_id):
 
 # get specific trade
 @solana_bp.route('/token_stats/<int:trade_id>', methods=['GET'])
+@jwt_required()
 def token_stats(trade_id):
-    trade = Trade.query.get_or_404(trade_id)
+    user_id = get_jwt_identity()
+    trade = Trade.query.filter_by(id=trade_id, user_id=user_id).first()
+    if not trade:
+        return jsonify({"error": "Trade not found"}), 404
     token_address = trade.token_address
 
     try:
@@ -430,17 +437,21 @@ def token_stats(trade_id):
 
 # buy more token against this trade
 @solana_bp.route('/buy_token/<int:trade_id>/', methods=['PUT'])
+@jwt_required()
 def buy_token(trade_id):
     global signature
     try:
+        user_id = get_jwt_identity()
         data = request.json
-        trade = Trade.query.get(trade_id)
+        trade = Trade.query.filter_by(id=trade_id, user_id=user_id).first()
+        if not trade:
+            return jsonify({"status": "failed", "message": "Trade not found"}), 404
         to_pubkey = trade.to_pubkey if trade.to_pubkey else ""
         token_address = trade.token_address if trade.token_address else ""
         amount = data.get("amount")
         current_token_price_ = get_token_price(token_address)
         current_token_price = current_token_price_["usdPrice"]
-        wallet = Wallet.query.filter_by(public_key=to_pubkey).first()
+        wallet = Wallet.query.filter_by(public_key=to_pubkey, user_id=user_id).first()
         if not wallet:
             return jsonify({"status": "failed", "message": "Failed to fetch wallet"}), 400
 
@@ -563,15 +574,17 @@ def buy_token(trade_id):
 
 
 @solana_bp.route('/api/update_auto_sell/<int:trade_id>', methods=['POST'])
+@jwt_required()
 def update_auto_sell(trade_id):
     try:
+        user_id = get_jwt_identity()
         data = request.get_json()
         auto_sell = data.get('auto_sell')
 
         if auto_sell is None:
             return jsonify({"status": "error", "message": "Missing 'auto_sell' field"}), 400
 
-        trade = Trade.query.get(trade_id)
+        trade = Trade.query.filter_by(id=trade_id, user_id=user_id).first()
         if not trade:
             return jsonify({"status": "error", "message": "Trade not found"}), 404
 

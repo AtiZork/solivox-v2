@@ -1,7 +1,6 @@
 async function loadAutoSnipeSettings() {
   try {
     const token = localStorage.getItem('token');  // Get JWT token from localStorage
-    console.log("token:", token);  // Debugging: Check the token value
     // const response = await fetch('/api/autosnipe');
     const response = await fetch('/api/autosnipe', {
       method: 'GET',
