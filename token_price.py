@@ -1,12 +1,15 @@
 from flask import Blueprint, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import TokenPrice, Trade
 
 token_price_bp = Blueprint("token_price_bp", __name__)
 
 
 @token_price_bp.route("/api/token/prices", methods=["GET"])
+@jwt_required()
 def get_all_token_prices():
-    trades = Trade.query.all()
+    user_id = get_jwt_identity()
+    trades = Trade.query.filter_by(user_id=user_id).all()
     result = []
 
     for trade in trades:

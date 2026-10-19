@@ -1,6 +1,8 @@
-
-
-
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+}
 
 document.addEventListener("DOMContentLoaded", function () {
     // Open & Close Drawer
@@ -76,7 +78,6 @@ document.getElementById("createwalletForm").addEventListener("submit",  async  f
         try {
             // Send POST Request
             const token = localStorage.getItem("token");  // Get JWT token
-            console.log("Token:", token);  // Debugging: Check if token is retrieved correctly
             const response = await fetch(apiUrl, {
                 method: "POST",
                 headers: {
@@ -154,6 +155,7 @@ document.getElementById("createwalletForm").addEventListener("submit",  async  f
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
+                    "Authorization": `Bearer ${localStorage.getItem("token")}`,
                 },
                 body: JSON.stringify(data),
             });
@@ -219,6 +221,7 @@ document.getElementById("createwalletForm").addEventListener("submit",  async  f
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
+                    "Authorization": `Bearer ${localStorage.getItem("token")}`,
                 },
                 body: JSON.stringify(data),
             });
@@ -266,7 +269,6 @@ document.getElementById("createwalletForm").addEventListener("submit",  async  f
         }
 
         if (valid) {
-            console.log("Private Key:", privateKeyValue);
                    const apiUrl = "/attach_wallet"; // Replace with actual API
 
         // API Data (Customize based on your needs)
@@ -406,7 +408,7 @@ const walletContainer = document.getElementById("walletContainer");
 //                 <div class="col-md-4  col-sm-6  mb-4"> <!-- 4 cards per row on md+, 2 per row on sm -->
 //                     <div class="wallet-card ${bgColor} p-3 rounded shadow">
 //                         <div class="text-white">
-//                             <p class="fs-14 mb-0 font-w100">${wallet.title || "No Title"}</p>
+//                             <p class="fs-14 mb-0 font-w100">${escapeHtml(wallet.title) || "No Title"}</p>
 //                             <span>${formattedBalance}</span>
 //                         </div>
 //                         <div class="wallet-footer mt-3">
@@ -457,7 +459,7 @@ async function fetchWallets() {
                 <div class="col-md-3 col-sm-6 mb-4"> <!-- 4 cards per row on md+, 2 per row on sm -->
                     <div class="wallet-card ${bgColor} p-3 rounded shadow">
                         <div class="text-white">
-                            <p class="fs-14 mb-0 font-w100">${wallet.title || "No Title"}</p>
+                            <p class="fs-14 mb-0 font-w100">${escapeHtml(wallet.title) || "No Title"}</p>
                             <span>${formattedBalance}</span>
                         </div>
                         <div class="wallet-footer mt-3">

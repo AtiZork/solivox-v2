@@ -9,6 +9,7 @@ from shyft_pricing import get_token_price
 from utils import calculate_profit_and_payout, get_estimated_market_cap
 from flask_socketio import emit, disconnect
 from flask import copy_current_request_context
+from flask_jwt_extended import decode_token
 
 
 # @socketio.on("subscribe_trades")
@@ -94,14 +95,30 @@ from flask import copy_current_request_context
 #     Thread(target=emit_trade_loop).start()
 
 @socketio.on("subscribe_trades")
-def handle_trade_subscription():
+def handle_trade_subscription(data=None):
 
     sid = request.sid  # Get the session ID of the connected client
     global market_cap
-    # while True:
+
+    # No HTTP request context here, so @jwt_required() doesn't apply - the
+    # client sends its JWT in the emit payload instead. Previously this had
+    # no auth at all and returned the latest 4 trades across every user.
+    token = (data or {}).get("token")
     try:
-        # trades = Trade.query.order_by(Trade.created_at.desc()).all()
-        trades = Trade.query.order_by(Trade.created_at.desc()).limit(4).all()
+        user_id = decode_token(token)["sub"] if token else None
+    except Exception:
+        user_id = None
+    if not user_id:
+        emit("trades_error", {"message": "Unauthorized"}, to=sid)
+        return
+
+    try:
+        trades = (
+            Trade.query.filter_by(user_id=user_id)
+            .order_by(Trade.created_at.desc())
+            .limit(4)
+            .all()
+        )
         trade_data = []
 
         for trade in trades:

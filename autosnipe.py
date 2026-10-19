@@ -439,6 +439,26 @@ def toggle_autosnipe_active(config_id):
 
 @autosnipe_bp.route('/start_all', methods=['POST'])
 def start_all_bots():
+    """Retired: legacy buy path, kept here disabled rather than deleted.
+
+    This started a second, unauthenticated buy bot (autosnipe_logic.auto_buy_processor)
+    that picks an arbitrary user's wallet/config via Wallet.query.first() /
+    AutoSnipeConfig.query.first() instead of the caller's own, and creates Trade
+    rows without user_id (a NOT NULL column) - so its DB write throws after a
+    real on-chain buy has already been sent, leaving an unrecorded, unsellable
+    position. The real sniper (autosnipe_buy_new_token.start_sniper_ingestion,
+    started from main.py) already covers token sniping independently of this
+    route. Route disabled rather than wired up with auth, since the thing it
+    would then authorize is itself unsafe to run.
+    """
+    return jsonify({
+        "status": "error",
+        "message": "This endpoint has been retired. The sniper runs automatically; "
+                    "use the AutoSnipe config's Active toggle instead.",
+    }), 410
+
+
+def _start_all_bots_disabled():
     """Starts both the Solana listener and the auto-buy processor."""
     global listener_thread, auto_buy_thread
 
@@ -472,6 +492,14 @@ def start_all_bots():
 
 @autosnipe_bp.route('/stop_all', methods=['POST'])
 def stop_all_bots():
+    """Retired along with /start_all - see start_all_bots() docstring."""
+    return jsonify({
+        "status": "error",
+        "message": "This endpoint has been retired. Use the AutoSnipe config's Active toggle instead.",
+    }), 410
+
+
+def _stop_all_bots_disabled():
     """Stops both the Solana listener and the auto-buy processor."""
     global listener_thread, auto_buy_thread
     logger.info("Stopping all bots...")

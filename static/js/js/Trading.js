@@ -1,3 +1,9 @@
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+}
+
 document.addEventListener("DOMContentLoaded", async function () {
     const walletSelect = document.getElementById("wallet-key");
     try {
@@ -64,7 +70,6 @@ document.getElementById("TradingForm").addEventListener("submit", async function
         };
         try {
             const token = localStorage.getItem("token");
-            console.log("token", token);
             const response = await fetch(apiUrl, {
                 method: "POST",
                 body: JSON.stringify(data),
@@ -153,7 +158,10 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
     }
     fetch(`/trade/${transactionId}`, {
             method: "PUT",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${localStorage.getItem("token")}`,
+            },
             body: JSON.stringify(requestData),
         })
         .then(response => response.json())
@@ -353,12 +361,12 @@ function displayTransaction(transaction) {
                 
                 <div class="d-flex align-items-center gap-2">
                     <p class="card-text mb-0"><strong>Name:</strong>
-                        <span class="masked-address">${transaction.title}</span>
+                        <span class="masked-address">${escapeHtml(transaction.title)}</span>
                     </p>
-                    <button class="copy-btn" data-token="${transaction.title}">
+                    <button class="copy-btn" data-token="${escapeHtml(transaction.title)}">
                         <i class="fas fa-copy"></i>
                     </button>
-                   
+
                 </div>
                 
                 <div class="d-flex align-items-center justify-content-between">

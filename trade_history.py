@@ -1,12 +1,19 @@
 from flask import Blueprint, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, Trade, TradeHistory
 
 trade_history_bp = Blueprint("trade_history", __name__)
 
 
 @trade_history_bp.route("/trade_history/<int:trade_id>", methods=["GET"])
+@jwt_required()
 def get_trade_history(trade_id):
     try:
+        user_id = get_jwt_identity()
+        trade = Trade.query.filter_by(id=trade_id, user_id=user_id).first()
+        if not trade:
+            return jsonify({"message": "Trade not found"}), 404
+
         # Fetch all history entries for this trade
         records = (
             TradeHistory.query

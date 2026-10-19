@@ -28,7 +28,14 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 # for production
 # socketio = SocketIO(app, async_mode="eventlet")
-app.config['JWT_SECRET_KEY'] = 'kHadk1-fmayaXHlx3PmEdS_NKMAsqPsVNa6c-QzPgic'  # change to secure key
+_jwt_secret = os.getenv("JWT_SECRET_KEY")
+if not _jwt_secret:
+    raise RuntimeError(
+        "JWT_SECRET_KEY is not set. Add it to your local .env (see .env.example) - "
+        "a hardcoded value used to be committed here, which let anyone with the "
+        "source forge a login token for any user."
+    )
+app.config['JWT_SECRET_KEY'] = _jwt_secret
 jwt = JWTManager(app)
 
 CORS(app)  # This allows all origins
