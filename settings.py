@@ -157,23 +157,24 @@ SNIPER_MINT_TRACKING_TTL_SEC = float(os.getenv("SNIPER_MINT_TRACKING_TTL_SEC", "
 PRICE_USE_WEBSOCKET = os.getenv("PRICE_USE_WEBSOCKET", "true").lower() == "true"
 PRICE_HTTP_FALLBACK = os.getenv("PRICE_HTTP_FALLBACK", "true").lower() == "true"
 
-moraliz_api_key = os.getenv(
-    "MORALIS_API_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6ImNmMTVhODM4LTk3NmUtNDUxNS05Njc3LTE0YTUyNWRjMTc4NCIsIm9yZ0lkIjoiNDQxMDc5IiwidXNlcklkIjoiNDUzNzk2IiwidHlwZUlkIjoiNjgwOThlNjctNjJkYS00YTNjLTk2MDctNjkzNzZiOGQyZWFkIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3NDQzNTIwMjUsImV4cCI6NDkwMDExMjAyNX0.OkLc-k1tRX-J0uZNJ30i3w8dcCGp5jHOI9VeOGnE5mc",
-)
-Solcan_api_key = os.getenv(
-    "SOLSCAN_API_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NDk2Mjg2OTE3MTIsImVtYWlsIjoibXVzYWRkYXFhYmJhczk2QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc0OTYyODY5MX0.kKzTK1hz-c5NBw80Mb4P7hiIHbH81fUQwSVBS10L0Wo",
-)
+# Secrets: no fallback values are committed in source. Set these in a local
+# .env (gitignored) - see .env.example. A missing key only disables the
+# feature that needs it (handled by each caller), it does not crash startup,
+# since this app also needs to keep running for callers that don't need it.
+moraliz_api_key = os.getenv("MORALIS_API_KEY", "")
+Solcan_api_key = os.getenv("SOLSCAN_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Shyft (RPC + WebSocket + REST). Prefer env; defaults match prior local config.
 # Override via SHYFT_API_KEY / SHYFET_API_KEY (and optional URL overrides).
 # ---------------------------------------------------------------------------
-SHYFT_API_KEY = os.getenv("SHYFT_API_KEY") or os.getenv(
-    "SHYFET_API_KEY",
-    "bOmjFPxty2EMMr6j",
-)
+SHYFT_API_KEY = os.getenv("SHYFT_API_KEY") or os.getenv("SHYFET_API_KEY", "")
+if not SHYFT_API_KEY:
+    import logging as _logging
+
+    _logging.getLogger(__name__).warning(
+        "SHYFT_API_KEY is not set (see .env.example) - Shyft RPC/pricing calls will fail."
+    )
 SHYFT_RPC_URL = os.getenv(
     "SHYFT_RPC_URL",
     f"https://rpc.shyft.to?api_key={SHYFT_API_KEY}",

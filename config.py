@@ -2,9 +2,15 @@ import os
 
 
 class Config:
-    secret_key = "6e3c52cfac7b881f39926c9407be755307c702ff9be1712a786c5c8b05f23cca"  # Required for session management
+    # Was lowercase `secret_key`, which Flask's `from_object` ignores (only
+    # all-uppercase attributes are imported), so `app.secret_key` was never
+    # actually set. Renamed to the name Flask looks for, and no fallback
+    # value is committed - set SECRET_KEY in a local .env (see .env.example).
+    SECRET_KEY = os.getenv("SECRET_KEY", "")
     # PostgreSQL Configuration
-    SQLALCHEMY_DATABASE_URI = "postgresql://solana:solana@localhost/solana_wallets"
+    SQLALCHEMY_DATABASE_URI = os.getenv(
+        "DATABASE_URL", "postgresql://solana:solana@localhost/solana_wallets"
+    )
     # app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://solana:solana@db:5432/solana_wallets"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # Default pool (5 + 10 overflow = 15 connections) is exhausted under
