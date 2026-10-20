@@ -5,7 +5,7 @@ from autosnipe_logic import (
     solana_logs_listener,
     auto_buy_processor,
 )
-from models import db, AutoSnipeConfig, User, TradeLog
+from models import db, AutoSnipeConfig, User, TradeLog, Wallet
 import threading
 import asyncio
 import logging
@@ -54,6 +54,41 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# (field, min, max, max exclusive?) - min/max are the sane bounds for each
+# setting. Previously only numeric-ness was checked, so e.g. min_txns=0
+# (every launch instantly qualifies), buy_amount=-1, or slippage=1000 were
+# all silently accepted. Bounds below are a starting point, not fixed
+# business rules - adjust them if the real strategy needs a wider range.
+_RANGE_FIELDS = {
+    # 0 would mean "every new token instantly passes the buy-count filter".
+    'min_txns': (1, 1000),
+    'buy_txns_over_80_usd': (0, 100_000),
+    'launch_delay': (0, 300),
+    # Upper bound is a fat-finger guard (a typo like 100 SOL instead of 1),
+    # not a strategy limit - must be > 0 so the bot can't "buy" nothing.
+    'buy_amount': (0, 100),
+    # 100 is the real ceiling (100% slippage = accepts any output amount) -
+    # the client's strategy intentionally wants the full range available,
+    # so this isn't capped any lower.
+    'slippage': (0, 100),
+    'priority_fee': (0, 1),
+    'sell_priority_fee': (0, 1),
+    'drop_cutoff': (0, 100),
+    'drop_until_profit': (0, 100),
+    'drop_after_100': (0, 100),
+    'drop_after_400': (0, 100),
+    'sell_at_100': (0, 100), 'sell_at_200': (0, 100), 'sell_at_300': (0, 100),
+    'sell_at_400': (0, 100), 'sell_at_600': (0, 100), 'sell_at_800': (0, 100),
+    'sell_at_1000': (0, 100), 'sell_at_1500': (0, 100), 'sell_at_2500': (0, 100),
+    'sell_at_4000': (0, 100), 'sell_at_10000': (0, 100),
+    'inactivity_sell_seconds': (0, 3600),
+}
+# Fields whose lower bound is exclusive (must be strictly greater than, not
+# just "at least") - these are the ones that are meaningless or dangerous at
+# exactly zero: no buy, or launch-delay semantics up above already cover 0.
+_EXCLUSIVE_MIN_FIELDS = {'buy_amount', 'slippage'}
+
+
 def _validate_config_payload(data):
     """Validate incoming payload for autosnipe create/update. Returns list of errors."""
     from autosnipe_buy_logic import validate_half_txns_scan_duration
@@ -62,14 +97,33 @@ def _validate_config_payload(data):
     # numeric checks
     numeric_fields = [
         'buy_txns_over_80_usd', 'min_txns', 'launch_delay', 'buy_amount',
-        'slippage', 'priority_fee', 'half_txns_scan_duration',
+        'slippage', 'priority_fee', 'sell_priority_fee', 'half_txns_scan_duration',
     ]
+    parsed = {}
     for f in numeric_fields:
         if f in data and data.get(f) is not None:
             try:
-                float(data.get(f))
+                parsed[f] = float(data.get(f))
             except Exception:
                 errors.append(f"{f} must be numeric")
+
+    # Range checks - covers both the fields above and the sell-side fields
+    # (drop_cutoff, sell_at_*, ...) that previously had no validation at all.
+    for f, (lo, hi) in _RANGE_FIELDS.items():
+        if f not in data or data.get(f) is None:
+            continue
+        if f in parsed:
+            value = parsed[f]
+        else:
+            try:
+                value = float(data.get(f))
+            except Exception:
+                errors.append(f"{f} must be numeric")
+                continue
+        too_low = value <= lo if f in _EXCLUSIVE_MIN_FIELDS else value < lo
+        if too_low or value > hi:
+            errors.append(f"{f} must be between {lo} and {hi}")
+
     half_enabled = False
     if 'half_txns_scan_enabled' in data:
         half_enabled = _parse_bool(data.get('half_txns_scan_enabled'), False)
@@ -91,6 +145,29 @@ def _parse_bool(value, default=True):
     return bool(value)
 
 
+def _resolve_wallet_id(data, user_id, errors):
+    """Validates 'wallet_id' against the caller's own wallets if present.
+
+    Returns (should_set, value): should_set is False when the field wasn't
+    in the payload at all (leave the config's existing wallet_id alone);
+    value is None to explicitly clear it, or the validated wallet id.
+    """
+    if 'wallet_id' not in data:
+        return False, None
+    raw = data.get('wallet_id')
+    if raw in (None, ''):
+        return True, None
+    try:
+        wallet_id = int(raw)
+    except Exception:
+        errors.append('wallet_id must be an integer')
+        return False, None
+    if not Wallet.query.filter_by(id=wallet_id, user_id=user_id).first():
+        errors.append('wallet_id must be one of your own wallets')
+        return False, None
+    return True, wallet_id
+
+
 _SNIPER_ENABLE_FIELDS = (
     "drop_cutoff_enabled",
     "drop_after_100_enabled",
@@ -109,6 +186,7 @@ def autosnipe():
 
         # validate
         errors = _validate_config_payload(data)
+        set_wallet, wallet_id_value = _resolve_wallet_id(data, user_id, errors)
         if errors:
             return jsonify({'errors': errors}), 400
 
@@ -121,6 +199,9 @@ def autosnipe():
         else:
             # create a new config for this user (allow multiple AutoSnipers)
             config = AutoSnipeConfig(user_id=user_id)
+
+        if set_wallet:
+            config.wallet_id = wallet_id_value
 
         active = data.get("active", True)  # default True if missing
         config.active = _parse_bool(active, True)
@@ -137,6 +218,8 @@ def autosnipe():
             config.slippage = float(data.get('slippage'))
         if 'priority_fee' in data:
             config.priority_fee = float(data.get('priority_fee'))
+        if 'sell_priority_fee' in data:
+            config.sell_priority_fee = float(data.get('sell_priority_fee'))
         if 'half_txns_scan_enabled' in data:
             config.half_txns_scan_enabled = _parse_bool(data.get('half_txns_scan_enabled'), False)
         if 'half_txns_scan_duration' in data and data.get('half_txns_scan_duration') is not None:
@@ -197,14 +280,16 @@ def list_autosnipers():
                     mapped = {
                         'id': row.get('id'),
                         'active': bool(row.get('active')) if 'active' in row else True,
+                        'wallet_id': row.get('wallet_id'),
                         'buy_txns_over_80_usd': row.get('buy_txns_over_80_usd', 80),
                         'min_txns': row.get('min_txns', 5),
                         'launch_delay': row.get('launch_delay', 5),
                         'half_txns_scan_enabled': bool(row.get('half_txns_scan_enabled')) if 'half_txns_scan_enabled' in row else False,
                         'half_txns_scan_duration': row.get('half_txns_scan_duration', 30),
                         'buy_amount': row.get('buy_amount', 1.0),
-                        'slippage': row.get('slippage', 100),
+                        'slippage': row.get('slippage', 20),
                         'priority_fee': row.get('priority_fee', 0.01),
+                        'sell_priority_fee': row.get('sell_priority_fee', 0.01),
                         'drop_cutoff': row.get('drop_cutoff', 30),
                         'drop_cutoff_enabled': bool(row.get('drop_cutoff_enabled')) if 'drop_cutoff_enabled' in row else True,
                         'drop_until_profit': row.get('drop_until_profit', 99),
@@ -250,6 +335,7 @@ def get_autosnipe():
         if config:
             return jsonify({
                 "active": config.active,
+                "wallet_id": config.wallet_id,
                 "buy_txns_over_80_usd": config.buy_txns_over_80_usd,
                 "min_txns": config.min_txns,
                 "launch_delay": config.launch_delay,
@@ -258,6 +344,7 @@ def get_autosnipe():
                 "buy_amount": config.buy_amount,
                 "slippage": config.slippage,
                 "priority_fee": config.priority_fee,
+                "sell_priority_fee": getattr(config, "sell_priority_fee", 0.01),
                 "drop_cutoff": config.drop_cutoff,
                 "drop_cutoff_enabled": bool(getattr(config, "drop_cutoff_enabled", True)),
                 "drop_until_profit": config.drop_until_profit,
@@ -298,14 +385,16 @@ def get_autosnipe():
                 r = dict(row)
                 mapped = {
                     'active': bool(r.get('active')) if 'active' in r else True,
+                    'wallet_id': r.get('wallet_id'),
                     'buy_txns_over_80_usd': r.get('buy_txns_over_80_usd', 80),
                     'min_txns': r.get('min_txns', 5),
                     'launch_delay': r.get('launch_delay', 5),
                     'half_txns_scan_enabled': bool(r.get('half_txns_scan_enabled')) if 'half_txns_scan_enabled' in r else False,
                     'half_txns_scan_duration': r.get('half_txns_scan_duration', 30),
                     'buy_amount': r.get('buy_amount', 1.0),
-                    'slippage': r.get('slippage', 100),
+                    'slippage': r.get('slippage', 20),
                     'priority_fee': r.get('priority_fee', 0.01),
+                    'sell_priority_fee': r.get('sell_priority_fee', 0.01),
                     'drop_cutoff': r.get('drop_cutoff', 30),
                     'drop_cutoff_enabled': bool(r.get('drop_cutoff_enabled')) if 'drop_cutoff_enabled' in r else True,
                     'drop_until_profit': r.get('drop_until_profit', 99),
@@ -352,15 +441,18 @@ def update_autosnipe(config_id):
         data = request.get_json() or {}
         # validate
         errors = _validate_config_payload(data)
+        set_wallet, wallet_id_value = _resolve_wallet_id(data, user_id, errors)
         if errors:
             return jsonify({'errors': errors}), 400
         config = AutoSnipeConfig.query.filter_by(id=config_id, user_id=user_id).first()
         if not config:
             return jsonify({'error': 'Not found'}), 404
+        if set_wallet:
+            config.wallet_id = wallet_id_value
         # Update allowed fields
         if 'active' in data:
             config.active = _parse_bool(data.get('active'), config.active)
-        for f in ['buy_txns_over_80_usd','min_txns','launch_delay','buy_amount','slippage','priority_fee']:
+        for f in ['buy_txns_over_80_usd','min_txns','launch_delay','buy_amount','slippage','priority_fee','sell_priority_fee']:
             if f in data:
                 try:
                     setattr(config, f, float(data.get(f)))

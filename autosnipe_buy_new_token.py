@@ -22,6 +22,7 @@ from settings import (
     SNIPER_HTTP_FALLBACK,
     SNIPER_BUY_RECONCILE_INTERVAL_SEC,
     SNIPER_BUY_RECONCILE_TIMEOUT_SEC,
+    SNIPER_BUY_SOL_RESERVE_SOL,
 )
 from shyft_pricing import get_token_price, get_shyft_pricing_service
 from solders.pubkey import Pubkey
@@ -478,14 +479,33 @@ def _buy_token_internal(token_address, config, timer=None):
             logger.info(f"Token {token_address} already bought, skipping.")
             timer.outcome = "duplicate_skipped"
             return False
+        # BOUGHT_TOKENS alone is in-memory only - a restart clears it, so the
+        # same user could buy the same mint again. This DB check survives a
+        # restart; kept in addition to (not instead of) the in-memory set
+        # above, which is still useful as a fast path that avoids a query
+        # for mints seen repeatedly within the same run.
+        if Trade.query.filter_by(user_id=config.user_id, token_address=token_address, auto_snipe=True).first():
+            logger.info(f"Token {token_address} already has an AUTOSNIPE trade for this user, skipping.")
+            BOUGHT_TOKENS.add(buy_key)
+            timer.outcome = "duplicate_skipped"
+            return False
 
         # Fetch relevant settings from the AutoSnipeConfig
         # These are used for the actual swap execution parameters
         buy_amount_sol = config.buy_amount if config.buy_amount else 1.0
-        buy_slippage_percent_bps = int((config.slippage if config.slippage else 100) * 100) # Convert percentage to BPS
+        buy_slippage_percent_bps = int((config.slippage if config.slippage else 20) * 100) # Convert percentage to BPS
         priority_fee_sol = config.priority_fee if config.priority_fee else 0.01
 
-        wallet = Wallet.query.filter_by(user_id=config.user_id).first() # Assuming user_id can link to a wallet
+        # Prefer the wallet this sniper was explicitly configured with. Falls
+        # back to the user's oldest wallet (deterministic, unlike .first()
+        # with no order_by, which Postgres doesn't guarantee is stable) for
+        # configs saved before wallet_id existed, or left unset.
+        wallet = None
+        config_wallet_id = getattr(config, "wallet_id", None)
+        if config_wallet_id:
+            wallet = Wallet.query.filter_by(id=config_wallet_id, user_id=config.user_id).first()
+        if not wallet:
+            wallet = Wallet.query.filter_by(user_id=config.user_id).order_by(Wallet.id.asc()).first()
         if not wallet:
             logger.error(f"Failed to fetch wallet for user.")
             timer.outcome = "no_wallet"
@@ -494,17 +514,14 @@ def _buy_token_internal(token_address, config, timer=None):
 
         amount = buy_amount_sol # Amount in SOL to spend
 
-        # Token name/symbol only - metadata, not pricing (Shyft REST with an
-        # on-chain Metaplex fallback already built into get_token_details).
-        with timer.stage("token_details"):
-            try:
-                token_details = get_shyft_pricing_service().get_token_details(token_address)
-                token_name = token_details.get("name") or "Unknown"
-                token_symbol = token_details.get("symbol") or "UNKNOWN"
-            except Exception as exc:
-                logger.warning(f"Token details lookup failed for {token_address}: {exc}")
-                token_name = "Unknown"
-                token_symbol = "UNKNOWN"
+        # Shyft is intentionally not used anywhere on the buy's hot path -
+        # token name/symbol are just set statically rather than fetched, per
+        # explicit instruction to not depend on Shyft here at all (not even
+        # for metadata, let alone pricing). reconcile_pending_buys() still
+        # fills in the real entry price afterward from the confirmed
+        # transaction itself, same as before.
+        token_name = "Unknown"
+        token_symbol = "UNKNOWN"
 
         # Entry price is NOT fetched here - no Geyser, no Shyft, no live
         # price of any kind on the buy's hot path. It's a placeholder
@@ -522,8 +539,16 @@ def _buy_token_internal(token_address, config, timer=None):
             wallet_balance_response = solana_client.get_balance(Pubkey.from_string(to_pubkey), commitment=Confirmed)
         wallet_balance = wallet_balance_response.value / 1_000_000_000  # Convert lamports to SOL
 
-        if wallet_balance < amount:
-            logger.error(f"Insufficient balance. Wallet has {wallet_balance:.4f} SOL, but {amount:.4f} SOL is required.")
+        # Requires a reserve on top of the buy amount - rent, network/priority
+        # fees, and SOL the wallet will need to pay for its own later sell -
+        # not just enough to cover the buy itself. Otherwise the bot can spend
+        # a wallet down to a balance too low to ever sell from again.
+        required = amount + SNIPER_BUY_SOL_RESERVE_SOL
+        if wallet_balance < required:
+            logger.error(
+                f"Insufficient balance. Wallet has {wallet_balance:.4f} SOL, but {required:.4f} SOL is "
+                f"required ({amount:.4f} buy + {SNIPER_BUY_SOL_RESERVE_SOL:.4f} reserve)."
+            )
             timer.outcome = "insufficient_sol"
             return True
 
@@ -569,7 +594,12 @@ def _buy_token_internal(token_address, config, timer=None):
         swap_request = {
             "userPublicKey": str(wallet_keypair.pubkey()),
             "quoteResponse": quote_data,
-            "computeUnitPriceMicroLamports": int(priority_fee_sol * 1_000_000),  # Convert SOL to micro-lamports
+            # "computeUnitPriceMicroLamports" is a price PER compute unit; the
+            # old `* 1_000_000` conversion treated it as if it were the total
+            # fee, so 0.01 SOL became ~0.000002 SOL actually spent.
+            # "prioritizationFeeLamports" is the total lamports to spend on
+            # priority, which is what a SOL-denominated setting actually means.
+            "prioritizationFeeLamports": int(priority_fee_sol * 1_000_000_000),
             "wrapUnwrapSOL": True
         }
 
@@ -644,10 +674,18 @@ def _buy_token_internal(token_address, config, timer=None):
             trade_type="BUY",
             to_pubkey=to_pubkey,
 
+            # Sell priority fee (SOL). Previously nothing ever set this, so
+            # every snipe sell's priority fee was stuck at the column's own
+            # hardcoded default regardless of what the config asked for.
+            default_gas_fee=config.sell_priority_fee if getattr(config, "sell_priority_fee", None) else 0.01,
+
             # Autosnipe settings from the config
             auto_snipe=True, # This trade was initiated by autosnipe logic
             trade_kind="AUTOSNIPE", # Explicitly marking it as an AUTOSNIPE trade
-            autosnipe_sell_slippage=config.slippage if config.slippage else 0.30, # Use config slippage for sell if no dedicated field
+            # Percent (e.g. 20 = 20%), same unit as config.slippage - this is
+            # later multiplied by 100 to get bps (autosnipe_sell_script.py).
+            # The old 0.30 fallback here was 0.30%, not the intended 30%.
+            autosnipe_sell_slippage=config.slippage if config.slippage else 20,
             drop_cutoff=config.drop_cutoff if config.drop_cutoff else 30,
             drop_cutoff_enabled=bool(getattr(config, "drop_cutoff_enabled", True)),
             drop_until_profit=config.drop_until_profit if config.drop_until_profit else 99,

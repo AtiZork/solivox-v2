@@ -87,6 +87,12 @@
               <div class="container-fluid">
                 <div class="row">
                   <div class="col-md-6 mb-3">
+                    <label class="form-label">Wallet</label>
+                    <select id="modal_wallet_id" class="form-control">
+                      <option value="">Use my first wallet (default)</option>
+                    </select>
+                  </div>
+                  <div class="col-md-6 mb-3">
                     <label class="form-label">Buy Txns &gt; USD</label>
                     <input type="number" id="modal_buy_txns_over_80_usd" class="form-control" value="80" />
                   </div>
@@ -114,11 +120,15 @@
                   </div>
                   <div class="col-md-6 mb-3">
                     <label class="form-label">Buy Slippage %</label>
-                    <input type="number" id="modal_slippage" class="form-control" value="100" />
+                    <input type="number" id="modal_slippage" class="form-control" value="20" />
                   </div>
                   <div class="col-md-6 mb-3">
-                    <label class="form-label">Priority Fee (SOL)</label>
+                    <label class="form-label">Buy Priority Fee (SOL)</label>
                     <input type="number" step="0.0001" id="modal_priority_fee" class="form-control" value="0.01" />
+                  </div>
+                  <div class="col-md-6 mb-3">
+                    <label class="form-label">Sell Priority Fee (SOL)</label>
+                    <input type="number" step="0.0001" id="modal_sell_priority_fee" class="form-control" value="0.01" />
                   </div>
 
                   <div class="col-12"><hr /></div>

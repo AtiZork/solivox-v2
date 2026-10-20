@@ -54,6 +54,7 @@ class Wallet(db.Model):
         """Convert wallet object to dictionary."""
         balance = solana_client.get_balance(Pubkey.from_string(self.public_key))
         return {
+            "id": self.id,
             "public_key": self.public_key,
             "title": self.title,
             "name": "",
@@ -64,6 +65,13 @@ class AutoSnipeConfig(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # ✅ new field
     user = db.relationship('User', backref=db.backref('autosnipe_configs', lazy=True))
+    # Which of the user's wallets this sniper buys with. Nullable: when unset,
+    # the buy flow falls back to the user's first wallet (by id) - previously
+    # it picked via Wallet.query.filter_by(user_id=...).first() with no
+    # explicit order, which Postgres doesn't guarantee is stable, so a user
+    # with more than one wallet could have a snipe buy land on the wrong one.
+    wallet_id = db.Column(db.Integer, db.ForeignKey('wallet.id'), nullable=True)
+    wallet = db.relationship('Wallet', foreign_keys=[wallet_id])
     # New field for Buy Txns > 80 USD
     buy_txns_over_80_usd = db.Column(db.Integer, nullable=False, default=80)
     # Basic fields with defaults
@@ -74,8 +82,16 @@ class AutoSnipeConfig(db.Model):
     half_txns_scan_enabled = db.Column(db.Boolean, nullable=False, default=False)
     half_txns_scan_duration = db.Column(db.Integer, nullable=False, default=30)
     buy_amount = db.Column(db.Float, nullable=False, default=1.0)
-    slippage = db.Column(db.Float, nullable=False, default=100)
-    priority_fee = db.Column(db.Float, nullable=False, default=0.01)
+    # Was 100 (=100% slippage, i.e. accepts any output amount - sandwichable/
+    # front-runnable for nearly the whole buy). 20% is a sane sniper default;
+    # only applies to new configs, existing saved configs keep their value.
+    slippage = db.Column(db.Float, nullable=False, default=20)
+    priority_fee = db.Column(db.Float, nullable=False, default=0.01)  # buy priority fee (SOL)
+    # Sell priority fee (SOL). Previously there was no way to configure this
+    # at all - sells always used Trade.default_gas_fee's column default
+    # (0.01), which nothing ever set from the sniper config, so every snipe
+    # sell's priority fee was permanently stuck at that one hardcoded value.
+    sell_priority_fee = db.Column(db.Float, nullable=False, default=0.01)
 
     # AutoSell settings with defaults
     drop_cutoff = db.Column(db.Float, default=30)
@@ -104,6 +120,7 @@ class AutoSnipeConfig(db.Model):
     # config even though the global SNIPER_SELL_INACTIVITY_* settings remain
     # the master on/off switch and fallback default.
     inactivity_sell_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    # 5s is an explicit client requirement, not a default to be tuned up.
     inactivity_sell_seconds = db.Column(db.Float, nullable=False, default=5.0)
     active = db.Column(db.Boolean, nullable=False, default=True)  # New field
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
@@ -112,6 +129,7 @@ class AutoSnipeConfig(db.Model):
         return {
             "id": self.id,
             "active": bool(self.active),
+            "wallet_id": self.wallet_id,
             "buy_txns_over_80_usd": self.buy_txns_over_80_usd,
             "min_txns": self.min_txns,
             "launch_delay": self.launch_delay,
@@ -120,6 +138,7 @@ class AutoSnipeConfig(db.Model):
             "buy_amount": self.buy_amount,
             "slippage": self.slippage,
             "priority_fee": self.priority_fee,
+            "sell_priority_fee": getattr(self, "sell_priority_fee", 0.01),
             "drop_cutoff": self.drop_cutoff,
             "drop_cutoff_enabled": bool(self.drop_cutoff_enabled),
             "drop_until_profit": self.drop_until_profit,
@@ -202,9 +221,11 @@ class Trade(db.Model):
     sell_at_1000_percent_profit = db.Column(db.Float, default=10.00)
     sell_at_2000_percent_profit = db.Column(db.Float, default=10.00)
     sell_at_10000_percent_profit = db.Column(db.Float, default=10.00)
-    # long gas fee/ slippage
-    long_slippage = db.Column(db.Float, default=0.10)  # buy slippage
-    long_sell_slippage = db.Column(db.Float, default=0.10)
+    # long gas fee/ slippage - percent (e.g. 20 = 20%), matching the UI's
+    # slippage inputs. Was 0.10 (= 0.10%), which converted to 0 bps wherever
+    # slippageBps was built directly from this column.
+    long_slippage = db.Column(db.Float, default=20)  # buy slippage
+    long_sell_slippage = db.Column(db.Float, default=20)
     long_buy_gas_fee = db.Column(db.Float, default=0.01)  # long buy gas fee
     long_sell_gas_fee = db.Column(db.Float, default=0.01)  # sell gas fee
 
@@ -218,7 +239,9 @@ class Trade(db.Model):
     # autosnipe settings
     auto_snipe = db.Column(db.Boolean, default=False, nullable=False)  # ✅ new field
     trade_kind = db.Column(db.String(20), nullable=False, default="LONG")  # <-- NEW FIELD: "LONG" or "AUTOSNIPE"
-    autosnipe_sell_slippage = db.Column(db.Float, default=0.30)
+    # Percent (e.g. 20 = 20%), same unit as AutoSnipeConfig.slippage. Was
+    # 0.30 (= 0.30%, converts to ~0 bps wherever this is read as a percent).
+    autosnipe_sell_slippage = db.Column(db.Float, default=20)
     drop_cutoff = db.Column(db.Float, default=30)
     drop_cutoff_enabled = db.Column(db.Boolean, nullable=False, default=True)
     drop_until_profit = db.Column(db.Float, default=99)
@@ -244,6 +267,11 @@ class Trade(db.Model):
     initial_token_amount = db.Column(db.Float, nullable=True)
     # Cumulative % of initial_token_amount already sold by take-profit tiers.
     tp_pct_sold = db.Column(db.Float, nullable=False, default=0)
+    # Highest price seen since entry, persisted so the trailing-stop rules
+    # (drop_after_100/400) survive a restart and still evaluate correctly
+    # once the price has pulled back under the 2x/5x that originally armed
+    # them. 0/None = no peak recorded yet (falls back to initial_price).
+    peak_price = db.Column(db.Float, nullable=True)
     # Momentum-exit rule: sell this position in full once its token has had
     # no detected trade for this long. Captured from AutoSnipeConfig at buy
     # time, same as drop_cutoff/drop_cutoff_enabled above.

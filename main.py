@@ -62,6 +62,8 @@ with app.app_context():
                 ("sell_at_800", "DOUBLE PRECISION DEFAULT 10"),
                 ("inactivity_sell_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("inactivity_sell_seconds", "DOUBLE PRECISION NOT NULL DEFAULT 5"),
+                ("wallet_id", "INTEGER"),
+                ("sell_priority_fee", "DOUBLE PRECISION NOT NULL DEFAULT 0.01"),
             ],
             "trade": [
                 ("drop_cutoff_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
@@ -76,6 +78,7 @@ with app.app_context():
                 ("tp_pct_sold", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
                 ("inactivity_sell_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("inactivity_sell_seconds", "DOUBLE PRECISION NOT NULL DEFAULT 5"),
+                ("peak_price", "DOUBLE PRECISION"),
             ],
             "trade_history": [
                 ("status", "VARCHAR(20) NOT NULL DEFAULT 'confirmed'"),

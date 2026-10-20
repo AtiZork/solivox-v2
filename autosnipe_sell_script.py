@@ -20,6 +20,7 @@ from solana.rpc.types import TxOpts
 from settings import (
     solana_client,
     SNIPER_SELL_PRICE_WORKERS,
+    SNIPER_SELL_SEND_WORKERS,
     SNIPER_SELL_STREAM,
     SNIPER_SELL_STREAM_SYNC_SEC,
     SNIPER_SELL_EVENT_WORKERS,
@@ -304,7 +305,17 @@ def _sell_if_due(
     if force_reason:
         decision = SellDecision(amount=trade_data.purchased_token_amount or 0, message=f"Auto-Sell All: {force_reason}")
     else:
+        peak_before = getattr(trade_data, "peak_price", None)
         decision = evaluate_autosnipe_sell(trade_data, current_price, price_tracking)
+        # Persist a new peak as soon as it happens (not just when a sell
+        # fires) so it survives a restart - most ticks don't move the peak,
+        # so this only writes on a genuine new high, not every cycle.
+        if getattr(trade_data, "peak_price", None) != peak_before:
+            try:
+                db.session.commit()
+            except Exception as e:
+                logger.warning(f"[PeakPrice] failed to persist new peak for trade {trade_data.id}: {e}")
+                db.session.rollback()
     amount_to_trade, message = decision.amount, decision.message
     if amount_to_trade <= 0:
         return
@@ -425,7 +436,9 @@ def _sell_if_due(
         swap_request = {
             "userPublicKey": str(wallet_keypair.pubkey()),
             "quoteResponse": quote_data,
-            "computeUnitPriceMicroLamports": int(trade_data.default_gas_fee * 1_000_000),
+            # Total lamports to spend on priority, not a per-CU price (see
+            # autosnipe_buy_new_token.py's swap_request for the full note).
+            "prioritizationFeeLamports": int(trade_data.default_gas_fee * 1_000_000_000),
             "wrapUnwrapSOL": True
         }
 
@@ -484,7 +497,6 @@ def _sell_if_due(
                 status="sent",
             )
             db.session.add(executed_trade)
-            db.session.commit()
             if decision.take_profit_pct is not None:
                 if trade_data.initial_token_amount is None:
                     trade_data.initial_token_amount = trade_data.purchased_token_amount
@@ -493,9 +505,21 @@ def _sell_if_due(
             if full_exit:
                 trade_data.purchased_token_amount = 0
             else:
-                trade_data.purchased_token_amount -= amount_to_trade
+                # sold_tokens (what was actually sent, capped to the real
+                # on-chain balance) rather than amount_to_trade (what was
+                # requested) - otherwise the DB and the wallet drift apart
+                # whenever the two differ, e.g. the DB's purchased_token_amount
+                # had already overstated the real balance by the time this
+                # partial sell was capped.
+                trade_data.purchased_token_amount -= sold_tokens
             if trade_data.purchased_token_amount <= 0:
                 trade_data.executed = True
+            # One commit for both rows: a DB failure here previously could
+            # leave the TradeHistory "sent" row persisted (the first of two
+            # commits already went through) while trade_data's own bookkeeping
+            # update was rolled back - the next cycle would then still see the
+            # stale, un-sold-looking trade_data and could fire the same tier
+            # again. Committed together, either both persist or neither does.
             db.session.commit()
         except Exception as e:
             # The sale was sent; retrying soon on the stale row could sell twice.
@@ -776,7 +800,18 @@ def reconcile_pending_sells(app) -> None:
                 (datetime.utcnow() - history.timestamp).total_seconds() if history.timestamp else 0.0
             )
             try:
-                resp = solana_client.get_signature_statuses([Signature.from_string(history.tx_id)])
+                # search_transaction_history=True: without it, the RPC node
+                # only answers from its short-lived recent-status cache and
+                # returns None for anything that's aged out of it (a couple
+                # of minutes), even when the transaction actually landed -
+                # which this job would then "restore" as a failed sell after
+                # SNIPER_SELL_RECONCILE_TIMEOUT_SEC, creating a phantom open
+                # position for a sell that actually succeeded. Matches the
+                # buy-side reconcile (autosnipe_buy_new_token.py), which
+                # already passes this.
+                resp = solana_client.get_signature_statuses(
+                    [Signature.from_string(history.tx_id)], search_transaction_history=True
+                )
                 status = (resp.value or [None])[0]
             except Exception as e:
                 logger.warning(f"[Reconcile] get_signature_statuses failed for {history.tx_id}: {e}")
@@ -840,14 +875,42 @@ def auto_snipe_auto_sell_schedular(app):
                         done = time.monotonic()
                         return price_data, (done - start) * 1000, done
 
+                def _send_with_context(trade_id, current_price, timings):
+                    # Own app context, same reason as _fetch_price above - this
+                    # now runs on a send-pool thread, not the cycle thread.
+                    # Re-fetches the Trade here rather than taking the ORM
+                    # object loaded on the cycle thread: that object is bound
+                    # to the cycle thread's session, and a different thread's
+                    # app context resolves a different session, so
+                    # process_trade_sell's db.session.refresh(trade_data)
+                    # failed with "Instance is not persistent within this
+                    # Session" for every trade, every cycle tick, the moment
+                    # this pool was introduced.
+                    with app.app_context():
+                        trade_data = Trade.query.get(trade_id)
+                        if trade_data is None:
+                            return
+                        process_trade_sell(trade_data, current_price, timings=timings)
+
                 # Prices are fetched in parallel (a dead token can take the full
-                # Yellowstone timeout); each trade is evaluated and sold on this
-                # thread as soon as its price arrives.
+                # Yellowstone timeout); each trade is evaluated and sold as soon
+                # as its price arrives.
                 price_pool = ThreadPoolExecutor(
                     max_workers=max(1, SNIPER_SELL_PRICE_WORKERS), thread_name_prefix="sell-price"
                 )
                 price_futures = {price_pool.submit(_fetch_price, t.token_address): t for t in trades}
                 price_pool.shutdown(wait=False)
+                # Sends (quote + swap + send_transaction) run through their own
+                # small pool instead of one at a time on this thread - a slow
+                # quote for one trade (up to the 15s Jupiter timeout) previously
+                # delayed every other trade's stop-loss/take-profit behind it.
+                # Safe to run concurrently: process_trade_sell's per-trade lock
+                # already means two paths can never act on the same trade at
+                # once (whichever loses the race just returns immediately).
+                send_pool = ThreadPoolExecutor(
+                    max_workers=max(1, SNIPER_SELL_SEND_WORKERS), thread_name_prefix="sell-send"
+                )
+                send_futures = []
                 for price_future in as_completed(price_futures):
                     trade_data = price_futures[price_future]
                     # A failed/invalid Yellowstone fetch skips this trade for the
@@ -861,10 +924,14 @@ def auto_snipe_auto_sell_schedular(app):
                     except Exception as e:
                         logger.warning(f"Failed to fetch price for trade {trade_data.id}: {e}")
                         continue
-                    # queue_wait: priced but waiting for earlier sells in this cycle.
-                    process_trade_sell(trade_data, current_price, timings={
-                        "price": price_ms, "queue_wait": (time.monotonic() - priced_at) * 1000,
-                    })
+                    # queue_wait: priced but waiting for a free send-pool worker.
+                    timings = {"price": price_ms, "queue_wait": (time.monotonic() - priced_at) * 1000}
+                    send_futures.append(send_pool.submit(_send_with_context, trade_data.id, current_price, timings))
+                send_pool.shutdown(wait=True)
+                for send_future in send_futures:
+                    exc = send_future.exception()
+                    if exc is not None:
+                        logger.error(f"Unexpected error sending a sell in this cycle: {exc}")
                 print("autosnipe token sell successfully executed")
                 return None
             except Exception as e:

@@ -83,9 +83,17 @@ SNIPER_DECISION_POOL_SIZE = int(os.getenv("SNIPER_DECISION_POOL_SIZE", "20"))
 # and launch_ws_to_registered both spiked from ~150-300ms to multi-second
 # during a burst on one hot mint before this cap was added).
 SNIPER_MAX_BUY_CANDIDATES_PER_MINT = int(os.getenv("SNIPER_MAX_BUY_CANDIDATES_PER_MINT", "200"))
-# Concurrent price fetches per sniper sell cycle. Sells themselves stay
-# sequential; raise with care, Shyft RPC/gRPC rate limits apply.
+# Concurrent price fetches per sniper sell cycle; raise with care, Shyft
+# RPC/gRPC rate limits apply.
 SNIPER_SELL_PRICE_WORKERS = int(os.getenv("SNIPER_SELL_PRICE_WORKERS", "10"))
+# Concurrent sell sends (quote + swap + send_transaction) per cycle. Was
+# fully sequential on the cycle thread - one slow quote (up to the 15s
+# Jupiter timeout) delayed every other trade's stop-loss/take-profit behind
+# it, even though each trade's own per-trade lock already makes concurrent
+# sends for DIFFERENT trades safe (a trade already being sold by another
+# path is simply skipped, not double-sold). Kept smaller than the price-fetch
+# pool: each send is a real swap request, not just a price read.
+SNIPER_SELL_SEND_WORKERS = int(os.getenv("SNIPER_SELL_SEND_WORKERS", "5"))
 # How often the backup sell-decision cycle re-evaluates every open trade.
 # This is only the safety net: the primary path is the instant per-mint
 # trigger (SNIPER_SELL_STREAM), which reacts the moment a token trades,
@@ -111,7 +119,8 @@ SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_RATE_LIMIT_CO
 # Momentum-exit rule: a position whose token has had no detected trade for
 # this long is sold in full, regardless of price - once a token stops
 # trading, holding longer offers no new signal either way for a sniper
-# strategy. Master switch + the threshold itself.
+# strategy. Master switch + the threshold itself. 5s is an explicit client
+# requirement (aggressive sniper strategy), not a default to be tuned up.
 SNIPER_SELL_INACTIVITY_ENABLED = os.getenv("SNIPER_SELL_INACTIVITY_ENABLED", "true").lower() == "true"
 SNIPER_SELL_INACTIVITY_SEC = float(os.getenv("SNIPER_SELL_INACTIVITY_SEC", "5"))
 # How often the inactivity sweep compares "now" against each open mint's last
@@ -223,3 +232,13 @@ SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_YELLOWSTONE_
 # 5 seconds or 5 minutes later gives the same answer either way.
 SNIPER_BUY_RECONCILE_INTERVAL_SEC = float(os.getenv("SNIPER_BUY_RECONCILE_INTERVAL_SEC", "5"))
 SNIPER_BUY_RECONCILE_TIMEOUT_SEC = float(os.getenv("SNIPER_BUY_RECONCILE_TIMEOUT_SEC", "90"))
+
+# Minimum SOL a wallet must keep back, on top of the buy amount itself,
+# before a snipe buy is allowed to send. The old check was just
+# `wallet_balance < buy_amount`, which ignores ATA rent (~0.002 SOL) and the
+# buy's own network/priority fees. Was 0.05 - 50x some clients' actual buy
+# amount (e.g. 0.001 SOL), which blocked every buy on a wallet deliberately
+# funded that thin. 0.003 just covers this buy's own rent/fees, not a
+# separate cushion for a later sell - explicit tradeoff for clients who run
+# wallets this thin.
+SNIPER_BUY_SOL_RESERVE_SOL = float(os.getenv("SNIPER_BUY_SOL_RESERVE_SOL", "0.003"))

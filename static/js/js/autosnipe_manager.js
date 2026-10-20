@@ -56,7 +56,7 @@ function createCardElement(sniper) {
       </div>
       <div class="card-body">
         <p class="mb-1">Buy amount: <strong>${sniper.buy_amount}</strong> SOL</p>
-        <p class="mb-1">Buy slippage: <strong>${sniper.slippage}</strong>% • Priority fee: <strong>${sniper.priority_fee}</strong> SOL</p>
+        <p class="mb-1">Buy slippage: <strong>${sniper.slippage}</strong>% • Buy fee: <strong>${sniper.priority_fee}</strong> SOL • Sell fee: <strong>${sniper.sell_priority_fee ?? 0.01}</strong> SOL</p>
         <p class="mb-1">Launch delay: <strong>${sniper.launch_delay}</strong>s</p>
         <p class="mb-1">Half-txn extended scan: <strong>${sniper.half_txns_scan_enabled ? 'On' : 'Off'}</strong>${sniper.half_txns_scan_enabled ? ` • +${sniper.half_txns_scan_duration || 30}s` : ''}</p>
         <hr />
@@ -146,6 +146,7 @@ function openModalWithData(sniper) {
   const buyAmountField = document.getElementById('modal_buy_amount');
   const slippageField = document.getElementById('modal_slippage');
   const priorityFeeField = document.getElementById('modal_priority_fee');
+  const sellPriorityFeeField = document.getElementById('modal_sell_priority_fee');
   const dropCutoffField = document.getElementById('modal_drop_cutoff');
   const dropUntilField = document.getElementById('modal_drop_until_profit');
   const dropAfter100Field = document.getElementById('modal_drop_after_100');
@@ -164,13 +165,16 @@ function openModalWithData(sniper) {
   const sell10000 = document.getElementById('modal_sell_at_10000');
   const activeField = document.getElementById('modal_active');
 
+  const walletField = document.getElementById('modal_wallet_id');
   if (idField) idField.value = sniper.id || '';
+  if (walletField) walletField.value = sniper.wallet_id ? String(sniper.wallet_id) : '';
   if (buyTxnsField) buyTxnsField.value = sniper.buy_txns_over_80_usd ?? 80;
   if (minTxnsField) minTxnsField.value = sniper.min_txns ?? 5;
   if (launchDelayField) launchDelayField.value = sniper.launch_delay ?? 5;
   if (buyAmountField) buyAmountField.value = sniper.buy_amount ?? 1;
-  if (slippageField) slippageField.value = sniper.slippage ?? 100;
+  if (slippageField) slippageField.value = sniper.slippage ?? 20;
   if (priorityFeeField) priorityFeeField.value = sniper.priority_fee ?? 0.01;
+  if (sellPriorityFeeField) sellPriorityFeeField.value = sniper.sell_priority_fee ?? 0.01;
   const halfScanEnabled = document.getElementById('modal_half_txns_scan_enabled');
   const halfScanDuration = document.getElementById('modal_half_txns_scan_duration');
   if (halfScanEnabled) halfScanEnabled.checked = !!sniper.half_txns_scan_enabled;
@@ -226,6 +230,7 @@ function clearModal() {
   const buyAmountField = document.getElementById('modal_buy_amount');
   const slippageField = document.getElementById('modal_slippage');
   const priorityFeeField = document.getElementById('modal_priority_fee');
+  const sellPriorityFeeFieldClear = document.getElementById('modal_sell_priority_fee');
   const dropCutoffField = document.getElementById('modal_drop_cutoff');
   const dropUntilField = document.getElementById('modal_drop_until_profit');
   const dropAfter100Field = document.getElementById('modal_drop_after_100');
@@ -243,13 +248,16 @@ function clearModal() {
   const sell4000 = document.getElementById('modal_sell_at_4000');
   const sell10000 = document.getElementById('modal_sell_at_10000');
   const activeField = document.getElementById('modal_active');
+  const walletFieldClear = document.getElementById('modal_wallet_id');
   if (idField) idField.value = '';
+  if (walletFieldClear) walletFieldClear.value = '';
   if (buyTxnsField) buyTxnsField.value = 80;
   if (minTxnsField) minTxnsField.value = 5;
   if (launchDelayField) launchDelayField.value = 5;
   if (buyAmountField) buyAmountField.value = 1;
-  if (slippageField) slippageField.value = 100;
+  if (slippageField) slippageField.value = 20;
   if (priorityFeeField) priorityFeeField.value = 0.01;
+  if (sellPriorityFeeFieldClear) sellPriorityFeeFieldClear.value = 0.01;
   const halfScanEnabledClear = document.getElementById('modal_half_txns_scan_enabled');
   const halfScanDurationClear = document.getElementById('modal_half_txns_scan_duration');
   if (halfScanEnabledClear) halfScanEnabledClear.checked = false;
@@ -287,15 +295,18 @@ async function onModalSave(e) {
   e.preventDefault();
   const idField = document.getElementById('modal_autosniper_id');
   const id = idField ? idField.value : '';
+  const walletIdRaw = document.getElementById('modal_wallet_id')?.value;
   const payload = {
+    wallet_id: walletIdRaw ? parseInt(walletIdRaw) : null,
     buy_txns_over_80_usd: parseFloat(document.getElementById('modal_buy_txns_over_80_usd')?.value) || 80,
     min_txns: parseInt(document.getElementById('modal_min_txns')?.value) || 5,
     launch_delay: parseInt(document.getElementById('modal_launch_delay')?.value) || 5,
     half_txns_scan_enabled: !!document.getElementById('modal_half_txns_scan_enabled')?.checked,
     half_txns_scan_duration: parseInt(document.getElementById('modal_half_txns_scan_duration')?.value) || 30,
     buy_amount: parseFloat(document.getElementById('modal_buy_amount')?.value) || 1,
-    slippage: parseFloat(document.getElementById('modal_slippage')?.value) || 100,
+    slippage: parseFloat(document.getElementById('modal_slippage')?.value) || 20,
     priority_fee: parseFloat(document.getElementById('modal_priority_fee')?.value) || 0.01,
+    sell_priority_fee: parseFloat(document.getElementById('modal_sell_priority_fee')?.value) || 0.01,
     drop_cutoff: parseFloat(document.getElementById('modal_drop_cutoff')?.value) || 30,
     drop_cutoff_enabled: !!document.getElementById('modal_drop_cutoff_enabled')?.checked,
     drop_until_profit: parseFloat(document.getElementById('modal_drop_until_profit')?.value) || 99,
@@ -465,10 +476,32 @@ async function onModalDelete(e) {
   }
 }
 
+async function loadWalletOptions() {
+  const select = document.getElementById('modal_wallet_id');
+  if (!select) return;
+  try {
+    const data = await apiFetch('/get_wallets');
+    const wallets = (data && data.wallets) || [];
+    const previousValue = select.value;
+    select.innerHTML = '<option value="">Use my first wallet (default)</option>';
+    wallets.forEach((w) => {
+      const opt = document.createElement('option');
+      opt.value = String(w.id);
+      const shortKey = w.public_key ? `${w.public_key.slice(0, 4)}...${w.public_key.slice(-4)}` : '';
+      opt.textContent = w.title ? `${w.title} (${shortKey})` : shortKey;
+      select.appendChild(opt);
+    });
+    select.value = previousValue;
+  } catch (e) {
+    console.error('Failed to load wallets for the AutoSnipe modal', e);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   try {
     setupBindings();
     loadSnipers();
+    loadWalletOptions();
   } catch (e) {
     console.error('Error during autosniper init', e);
   }

@@ -14,6 +14,13 @@ from dotenv import load_dotenv
 from shyft_pricing import get_token_price
 from utils import get_token_metadata
 from solders.pubkey import Pubkey
+# Reused from the auto-sell bot so manual sells get the same safety
+# properties instead of a second, independently-maintained implementation:
+# a per-trade lock (so this can't race the auto-sell bot into a double
+# sell) and a real on-chain balance read (instead of trusting the DB's
+# purchased_token_amount, which can drift from what the wallet actually
+# holds).
+from autosnipe_sell_script import _trade_lock, get_wallet_token_balance
 
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
@@ -79,19 +86,31 @@ def get_token_balance(wallet_address, token_mint):
 @manual_sell_trade_bp.route('/sell_token/<int:trade_id>/', methods=['PUT'])
 @jwt_required()
 def sell_token(trade_id):
+    user_id = get_jwt_identity()
+    last_trade = Trade.query.filter_by(id=trade_id, user_id=user_id).first()
+    if not last_trade:
+        return jsonify({"status": "failed", "message": "Trade not found"}), 404
+
+    # Without this, a manual sell could race the auto-sell bot's own
+    # cycle/instant path (or another manual-sell click) into sending two
+    # sells for the same position at once.
+    lock = _trade_lock(trade_id)
+    if not lock.acquire(blocking=False):
+        return jsonify({
+            "status": "failed",
+            "message": "This trade is already being sold (by the auto-sell bot or another request) - try again shortly.",
+        }), 409
     try:
-        user_id = get_jwt_identity()
-        last_trade = Trade.query.filter_by(id=trade_id, user_id=user_id).first()
-        if not last_trade:
-            return jsonify({"status": "failed", "message": "Trade not found"}), 404
+        db.session.refresh(last_trade)
+        if last_trade.executed:
+            return jsonify({"status": "failed", "message": "This position is already fully sold"}), 400
+
         token_address = last_trade.token_address
         to_pubkey = last_trade.to_pubkey
-        # balance = get_token_balance(to_pubkey, token_address)
 
-        # # Calculate amount to sell
         data = request.json
         sell_percent = data.get('sell_percent')  # sell % like 10%, 25%, etc.
-        sell_amount = data.get('sell_amount')  # Optional: sell exact amount
+        sell_amount = data.get('sell_amount')  # Optional: sell exact amount (in SOL)
         total_tokens = last_trade.purchased_token_amount
         token_price_usd = None
         sol_price_usd = None
@@ -116,14 +135,24 @@ def sell_token(trade_id):
         else:
             return jsonify({"status": "failed", "message": "Provide either sell_amount_sol or sell_percent"}), 400
 
-        # if sell_amount > 0:
-        #     amount = sell_amount
-        # else:
-        #     amount = (sell_percent / 100.0) * total_tokens
         if amount <= 0:
             return jsonify({"status": "failed", "message": "Sell token amount must be greater then 0"}), 400
         if amount > total_tokens:
             return jsonify({"status": "failed", "message": "Sell token amount greater then available tokens"}), 400
+
+        # Cap to what the wallet actually holds on-chain - purchased_token_amount
+        # is the DB's bookkeeping estimate and can drift from reality (a prior
+        # partial sell that landed for slightly less than requested, a buy
+        # quote that over/under-estimated the fill, etc.).
+        try:
+            raw_balance, decimals = get_wallet_token_balance(Pubkey.from_string(to_pubkey), token_address)
+            real_balance = raw_balance / (10 ** decimals) if decimals else 0.0
+        except Exception as e:
+            return jsonify({"status": "failed", "message": f"Could not verify on-chain balance: {e}"}), 400
+        if real_balance <= 0:
+            return jsonify({"status": "failed", "message": "Wallet holds 0 of this token on-chain"}), 400
+        amount = min(amount, real_balance)
+
         current_token_price_ = get_token_price(token_address)
         current_token_price = current_token_price_["usdPrice"]
         wallet = Wallet.query.filter_by(public_key=to_pubkey, user_id=user_id).first()
@@ -133,8 +162,14 @@ def sell_token(trade_id):
 
         with open(private_key_path, 'rb') as key_file:
             private_key_bytes = key_file.read()
-            # Create a solders Keypair directly from the private key bytes
-        wallet_keypair = SoldersKeypair.from_seed(private_key_bytes)
+        # Wallets created via attach/recover can store either a 32-byte seed
+        # or a 64-byte raw keypair (build_keypair_from_private_key accepts
+        # both) - from_seed() alone raises for the 64-byte case, matching the
+        # auto-sell bot's own handling of both lengths.
+        if len(private_key_bytes) == 64:
+            wallet_keypair = SoldersKeypair.from_bytes(private_key_bytes)
+        else:
+            wallet_keypair = SoldersKeypair.from_seed(private_key_bytes)
         token_pubkey = Pubkey.from_string(token_address)
         token_info = solana_client.get_token_supply(token_pubkey)
         if token_info and hasattr(token_info.value, "decimals"):
@@ -156,7 +191,7 @@ def sell_token(trade_id):
             "outputMint": "So11111111111111111111111111111111111111112",
             # amount in raw unit like USDC 6 decimal we sell 5 token then we enter 5*1000000
             "amount": amount_in_lamports,
-            "slippageBps": int(last_trade.long_sell_slippage)
+            "slippageBps": int((last_trade.long_sell_slippage or 20) * 100),  # percent -> bps
         }
 
         quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
@@ -176,8 +211,9 @@ def sell_token(trade_id):
         swap_request = {
             "userPublicKey": str(wallet_keypair.pubkey()),
             "quoteResponse": quote_data,
-            "computeUnitPriceMicroLamports": int(last_trade.long_sell_gas_fee * 1_000_000),
-            # Convert SOL to micro-lamports
+            # Total lamports to spend on priority, not a per-CU price (see
+            # autosnipe_buy_new_token.py's swap_request for the full note).
+            "prioritizationFeeLamports": int(last_trade.long_sell_gas_fee * 1_000_000_000),
             "wrapUnwrapSOL": True  # Automatically handle SOL to WSOL conversion
         }
 
@@ -221,21 +257,28 @@ def sell_token(trade_id):
             logger.info(f"View transaction on Solscan: https://solscan.io/tx/{signature}")
             print(f"✅ Auto trade job executed in {execution_time_ms:.2f} ms!")
             print(f"View transaction on Solscan: https://solscan.io/tx/{signature}")
-            # Store executed trade in database
+            # trade_type="SELL" + status="sent": a send succeeding only means
+            # the RPC node accepted it for broadcast, not that it landed -
+            # this hooks the manual sell into the auto-sell bot's own
+            # reconcile_pending_sells() job, which confirms it shortly after
+            # (or restores these tokens to the open position if the send
+            # never actually landed on-chain). Previously this recorded no
+            # "sent" row at all, so a failed manual sell permanently reduced
+            # the position with nothing to ever recover it.
             executed_trade = TradeHistory(
                 trade_id=last_trade.id if last_trade else None,
                 token_address=token_address,
-                trade_type="ManualSEll",
+                trade_type="SELL",
                 amount=amount,
                 execution_price=current_token_price,  # Use the fetched price
-                tx_id=signature
+                tx_id=signature,
+                status="sent",
             )
             db.session.add(executed_trade)
             db.session.commit()
             last_trade.purchased_token_amount -= amount
             if last_trade.purchased_token_amount <= 0:
-                # db.session.delete(trade_data)
-                last_trade.executed = True  # Soft delete instead of actual deletion
+                last_trade.executed = True
             db.session.commit()
             return jsonify({"status": "success", "message": "Token SELL Successfully"}), 200
         except Exception as e:
@@ -245,3 +288,5 @@ def sell_token(trade_id):
         logger.error(f"[TRADE ERROR] {str(e)}")
         db.session.rollback()  # 🔥 Rollback if an error occurs
         return jsonify({"status": "failed", "error": str(e)}), 500
+    finally:
+        lock.release()

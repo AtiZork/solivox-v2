@@ -142,7 +142,7 @@ def long_auto_sell_schedular(app):
                                 "inputMint": "So11111111111111111111111111111111111111112",  # WSOL
                                 "outputMint": token_address,  # USDC
                                 "amount": amount_in_lamports,  # 0.01 WSOL
-                                "slippageBps": int(trade_data.long_slippage)
+                                "slippageBps": int((trade_data.long_slippage or 20) * 100),  # percent -> bps
                             }
 
                             quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
@@ -164,8 +164,9 @@ def long_auto_sell_schedular(app):
                             swap_request = {
                                 "userPublicKey": str(wallet_keypair.pubkey()),
                                 "quoteResponse": quote_data,
-                                "computeUnitPriceMicroLamports": int(trade_data.default_gas_fee * 1_000_000),
-                                # Convert SOL to micro-lamports
+                                # Total lamports to spend on priority, not a per-CU price (see
+                                # autosnipe_buy_new_token.py's swap_request for the full note).
+                                "prioritizationFeeLamports": int(trade_data.default_gas_fee * 1_000_000_000),
                                 "wrapUnwrapSOL": True  # Automatically handle SOL to WSOL conversion
                             }
 
@@ -359,7 +360,7 @@ def long_auto_sell_schedular(app):
                                         "outputMint": "So11111111111111111111111111111111111111112",
                                         # amount in raw unit like USDC 6 decimal we sell 5 token then we enter 5*1000000
                                         "amount": amount_in_lamports,
-                                        "slippageBps": int(trade_data.long_sell_slippage)
+                                        "slippageBps": int((trade_data.long_sell_slippage or 20) * 100),  # percent -> bps
                                     }
 
                                     quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
@@ -383,8 +384,9 @@ def long_auto_sell_schedular(app):
                                     swap_request = {
                                         "userPublicKey": str(wallet_keypair.pubkey()),
                                         "quoteResponse": quote_data,
-                                        "computeUnitPriceMicroLamports": int(sell_gas_fee * 1_000_000),
-                                        # Convert SOL to micro-lamports
+                                        # Total lamports to spend on priority, not a per-CU price (see
+                                        # autosnipe_buy_new_token.py's swap_request for the full note).
+                                        "prioritizationFeeLamports": int(sell_gas_fee * 1_000_000_000),
                                         "wrapUnwrapSOL": True  # Automatically handle SOL to WSOL conversion
                                     }
 

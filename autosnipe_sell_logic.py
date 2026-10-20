@@ -76,22 +76,31 @@ def evaluate_autosnipe_sell(trade_data, current_price, price_tracking_map=None) 
     # default of 99 that meant any price >= 0.99x the buy price, so every
     # take-profit and trailing-stop rule below was unreachable.
 
-    if profit_multiplier >= 2.0:
-        peak_price = price_tracking_map.get(trade_data.id, current_price)
-        price_tracking_map[trade_data.id] = max(peak_price, current_price)
-        drop_percent = 100 * (peak_price - current_price) / peak_price if peak_price else 0
+    # Peak price: tracked for every tick regardless of the CURRENT profit
+    # level. Previously this whole block (including the peak update) only
+    # ran while profit_multiplier >= 2.0, so once the price pulled back
+    # under 2x the peak was never re-checked against - a 3x peak that fell
+    # to 1.4x (53% off peak) never tripped the 100%-drop rule, because the
+    # drop was simply never evaluated once price_multiplier dropped under 2.
+    # Prefers the persisted Trade.peak_price (survives a restart); falls
+    # back to the in-memory price_tracking_map for callers/tests that pass
+    # a plain object without that column.
+    stored_peak = getattr(trade_data, "peak_price", None) or price_tracking_map.get(trade_data.id, 0)
+    peak_price = max(stored_peak or 0, current_price)
+    price_tracking_map[trade_data.id] = peak_price
+    if hasattr(trade_data, "peak_price"):
+        trade_data.peak_price = peak_price
+    peak_multiplier = peak_price / initial_price
+    drop_percent = 100 * (peak_price - current_price) / peak_price if peak_price else 0
 
-        # FIELD_1: after 100% profit, sell if drops
-        if drop_after_100_on and drop_percent >= trade_data.drop_after_100:
-            return SellDecision(amount, f"Auto-Sell All after 100% profit, dropped {drop_percent:.2f}%")
+    # FIELD_1: once the PEAK has reached 100% profit, sell on a pullback from
+    # that peak - armed by the peak, not by where the price happens to be now.
+    if drop_after_100_on and peak_multiplier >= 2.0 and drop_percent >= trade_data.drop_after_100:
+        return SellDecision(amount, f"Auto-Sell All after 100% profit, dropped {drop_percent:.2f}% from peak")
 
-        # FIELD_2: after 400% profit, sell if drops
-        if (
-            drop_after_400_on
-            and profit_multiplier >= 5.0
-            and drop_percent >= trade_data.drop_after_400
-        ):
-            return SellDecision(amount, f"Auto-Sell All after 400% profit, dropped {drop_percent:.2f}%")
+    # FIELD_2: once the PEAK has reached 400% profit, sell on a pullback from that peak
+    if drop_after_400_on and peak_multiplier >= 5.0 and drop_percent >= trade_data.drop_after_400:
+        return SellDecision(amount, f"Auto-Sell All after 400% profit, dropped {drop_percent:.2f}% from peak")
 
     # Take-profit: every tier reached sells its % of the original position
     # once. Sell the gap between what all reached tiers add up to and what has

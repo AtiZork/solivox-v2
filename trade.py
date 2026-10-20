@@ -16,6 +16,7 @@ from settings import solana_client
 from utils import get_token_metadata, extract_token_info_from_moralis
 from solders.pubkey import Pubkey
 from shyft_pricing import get_token_price
+from autosnipe_buy_new_token import describe_send_error
 
 
 solana_bp = Blueprint('solana_bp', __name__)
@@ -63,14 +64,17 @@ def buy_token_trade():
             "sell_at_2000_percent_profit") else 10.00
         sell_at_10000_percent_profit = data.get("sell_at_10000_percent_profit") if data.get(
             "sell_at_10000_percent_profit") else 100.00
-        long_slippage = data.get("buy_slippage") if data.get("buy_slippage") else 0.10
+        # long_slippage/long_sell_slippage are a percent (the UI's slippage
+        # inputs show e.g. "30" meaning 30%, see Trading.js/LongTrade.js) -
+        # the old 0.10 fallback meant "0.10%", which converts to 0 bps below.
+        long_slippage = data.get("buy_slippage") if data.get("buy_slippage") else 20
         default_gas_fee = data.get("buy_gas_fee") if data.get("buy_gas_fee") else 0.01
         buy_now = data.get("buy_now") if data.get("buy_now") else False
         buy_token_if_price = data.get("buy_token_if_price") if data.get("buy_token_if_price") else False
         buy_if_price_up = data.get("buy_if_price_up") if data.get("buy_if_price_up") else 0
         buy_if_price_down = data.get("buy_if_price_down") if data.get("buy_if_price_down") else 0
         gas_fee = default_gas_fee if default_gas_fee else 0
-        long_sell_slippage = data.get("sell_slippage") if data.get("sell_slippage") else 0.10
+        long_sell_slippage = data.get("sell_slippage") if data.get("sell_slippage") else 20
         long_sell_gas_fee = data.get("sell_gas_fee") if data.get("sell_gas_fee") else 0.01
         if buy_now is True:
 
@@ -104,7 +108,7 @@ def buy_token_trade():
                 "inputMint": "So11111111111111111111111111111111111111112",  # WSOL
                 "outputMint": token_address,  # USDC
                 "amount": amount_in_lamports,  # 0.01 WSOL
-                "slippageBps": long_slippage
+                "slippageBps": int(float(long_slippage) * 100),  # percent -> bps
             }
 
             quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
@@ -126,7 +130,9 @@ def buy_token_trade():
             swap_request = {
                 "userPublicKey": str(wallet_keypair.pubkey()),
                 "quoteResponse": quote_data,
-                "computeUnitPriceMicroLamports": int(gas_fee * 1_000_000),  # Convert SOL to micro-lamports
+                # Total lamports to spend on priority, not a per-CU price (see
+                # autosnipe_buy_new_token.py's swap_request for the full note).
+                "prioritizationFeeLamports": int(gas_fee * 1_000_000_000),
                 "wrapUnwrapSOL": True  # Automatically handle SOL to WSOL conversion
             }
 
@@ -181,15 +187,21 @@ def buy_token_trade():
                 #     token_decimals = 0
                 # estimated_tokens = output_amount / (10 ** token_decimals)
             except RPCException as e:
-                error_message = e.args[0]
-                print("Transaction failed!")
-                print(f"Custom Program Error Code: {error_message.data.err.err.code}")
-                print(f"Message: {error_message.message}")
-                return jsonify({"status": "failed", "message": error_message}), 400
-        if buy_now is True:
-            trade_type = "SELL"
-        else:
-            trade_type = "BUY"
+                # Was error_message.data.err.err.code, which only exists for
+                # one specific error shape (a custom program error) and
+                # raised AttributeError - uncaught, inside an except block -
+                # for every other kind of RPC failure (expired blockhash,
+                # simulation failure, etc.), turning a clean 400 into a 500.
+                # jsonify(error_message) directly also isn't guaranteed to be
+                # JSON-serializable; describe_send_error always returns a str.
+                reason = describe_send_error(e)
+                print(f"Transaction failed! {reason}")
+                return jsonify({"status": "failed", "message": reason}), 400
+        # This endpoint only ever creates a buy-side trade (an immediate buy
+        # when buy_now is True, or a pending "buy if price..." trade
+        # otherwise) - it was previously labeling completed immediate buys
+        # as trade_type "SELL" (inverted).
+        trade_type = "BUY"
         new_trade = Trade(
             to_pubkey=to_pubkey,
             amount=amount,
@@ -481,7 +493,7 @@ def buy_token(trade_id):
             "inputMint": "So11111111111111111111111111111111111111112",  # WSOL
             "outputMint": token_address,  # USDC
             "amount": amount_in_lamports,  # 0.01 WSOL
-            "slippageBps": int(trade.long_slippage)
+            "slippageBps": int((trade.long_slippage or 20) * 100),  # percent -> bps
         }
 
         quote_endpoint = f"{API_BASE_URL}/swap/v1/quote"
@@ -503,7 +515,9 @@ def buy_token(trade_id):
         swap_request = {
             "userPublicKey": str(wallet_keypair.pubkey()),
             "quoteResponse": quote_data,
-            "computeUnitPriceMicroLamports": int(trade.default_gas_fee * 1_000_000),  # Convert SOL to micro-lamports
+            # Total lamports to spend on priority, not a per-CU price (see
+            # autosnipe_buy_new_token.py's swap_request for the full note).
+            "prioritizationFeeLamports": int(trade.default_gas_fee * 1_000_000_000),
             "wrapUnwrapSOL": True  # Automatically handle SOL to WSOL conversion
         }
 
@@ -553,11 +567,10 @@ def buy_token(trade_id):
                 trade.executed = False
             db.session.commit()
         except RPCException as e:
-            error_message = e.args[0]
-            print("Transaction failed!")
-            print(f"Custom Program Error Code: {error_message.data.err.err.code}")
-            print(f"Message: {error_message.message}")
-            return jsonify({"status": "failed", "message": error_message}), 400
+            # See the matching note on the other RPCException handler above.
+            reason = describe_send_error(e)
+            print(f"Transaction failed! {reason}")
+            return jsonify({"status": "failed", "message": reason}), 400
         executed_trade = TradeHistory(
             trade_id=trade.id if trade else None,
             token_address=token_address,

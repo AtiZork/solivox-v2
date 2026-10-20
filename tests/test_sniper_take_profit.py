@@ -265,6 +265,57 @@ def test_trailing_stop_after_100_percent_reachable_with_live_config():
     assert decision.take_profit_tier is None
 
 
+def test_trailing_stop_fires_after_price_falls_back_under_2x():
+    """Regression: peak 3x -> 1.4x (53% off peak) must still trigger the
+    100%-drop rule, even though current profit_multiplier (1.4) is now under
+    2.0. Previously the whole peak/trailing-stop block only ran while
+    profit_multiplier >= 2.0, so once price fell under 2x the drop was never
+    evaluated at all and this case was silently missed. Take-profit tiers
+    already sold are reflected via last_tp_tier/tp_pct_sold (as they would
+    be on a real Trade by the time it has peaked at 3x and pulled back),
+    isolating this assertion to the trailing-stop rule."""
+    trade = _live_config_trade(last_tp_tier=3.0, tp_pct_sold=20, initial_token_amount=1000.0)
+    decision = evaluate_autosnipe_sell(trade, 1.4, {1: 3.0})
+    assert decision.amount == 1000.0
+    assert "after 100% profit" in decision.message
+    assert "53.3" in decision.message  # (3.0 - 1.4) / 3.0 = 53.33%
+
+
+def test_trailing_stop_after_400_percent_fires_after_price_falls_back_under_5x():
+    """Regression: peak 6x -> 4.1x (~32% off peak) must trigger
+    drop_after_400=30, even though current profit_multiplier (4.1) is now
+    under the 5.0 that used to gate this rule entirely."""
+    trade = _live_config_trade(
+        drop_after_400=30, last_tp_tier=5.0, tp_pct_sold=30, initial_token_amount=1000.0,
+    )
+    decision = evaluate_autosnipe_sell(trade, 4.1, {1: 6.0})
+    assert decision.amount == 1000.0
+    assert "after 400% profit" in decision.message
+
+
+def test_peak_price_persisted_on_trade_survives_a_fresh_tracking_dict():
+    """Regression: the peak must be read from Trade.peak_price (DB-backed),
+    not only from the in-memory price_tracking_map - otherwise a process
+    restart (which clears the in-memory dict) loses the peak and the
+    trailing stop silently re-arms at whatever price it restarts at."""
+    trade = _live_config_trade(peak_price=3.0)
+    # Fresh, empty tracking dict - simulates a restart losing the in-memory map.
+    decision = evaluate_autosnipe_sell(trade, 1.4, {})
+    assert decision.amount == 1000.0
+    assert "after 100% profit" in decision.message
+
+
+def test_peak_price_updates_on_trade_as_new_highs_are_reached():
+    trade = _live_config_trade(peak_price=None)
+    evaluate_autosnipe_sell(trade, 2.5, {})
+    assert trade.peak_price == 2.5
+    evaluate_autosnipe_sell(trade, 4.0, {})
+    assert trade.peak_price == 4.0
+    # A lower tick must not lower the recorded peak.
+    evaluate_autosnipe_sell(trade, 3.0, {})
+    assert trade.peak_price == 4.0
+
+
 # --- Wallet balance read --------------------------------------------------
 
 TOKEN_2022 = sell_script.Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
@@ -347,7 +398,7 @@ def harness(tmp_path):
     _FakeVersionedTx.wallet_pubkey = keypair.pubkey()
 
     h = SimpleNamespace(trades=[], prices={}, jobs=[], quote_status={}, send_error=None, balances={},
-                        wallets={}, price_delays={}, events=[])
+                        wallets={}, price_delays={}, quote_delays={}, events=[])
 
     class _Scheduler:
         def __init__(self, *a, **k):
@@ -372,6 +423,9 @@ def harness(tmp_path):
 
     trade_model = MagicMock()
     trade_model.query.filter_by.side_effect = _filter_by
+    # Used by the send-pool's per-thread re-fetch (C12 fix): looks up by id
+    # regardless of executed state, matching real Trade.query.get() semantics.
+    trade_model.query.get.side_effect = lambda tid: next((t for t in h.trades if t.id == tid), None)
     default_wallet = SimpleNamespace(public_key="WalletPubkey", private_key=str(key_file))
     wallet_model = MagicMock()
     wallet_model.query.filter_by.side_effect = lambda **kw: SimpleNamespace(
@@ -380,6 +434,7 @@ def harness(tmp_path):
 
     def _quote(url, params=None, **kwargs):
         h.events.append(("quote", params["inputMint"], time.monotonic()))
+        time.sleep(h.quote_delays.get(params["inputMint"], 0))
         status = h.quote_status.get(params["inputMint"], 200)
         if status != 200:
             return _response(status, {"error": "No routes found", "errorCode": "NO_ROUTES_FOUND"})
@@ -485,6 +540,25 @@ def test_loop_partial_take_profit_uses_requested_amount_when_covered(harness):
     assert _quoted_amounts(harness) == [100_000_000]
     assert tp.purchased_token_amount == pytest.approx(900.0)
     assert tp.last_tp_tier == 2.0
+
+
+def test_loop_partial_sell_capped_by_balance_subtracts_actual_sold_amount(harness):
+    """Regression (C8): a partial sell request can exceed the real on-chain
+    balance even when it's well under the DB's purchased_token_amount (the
+    DB estimate had already drifted ahead of reality). purchased_token_amount
+    must drop by what was actually sold (capped to the real balance), not by
+    what was requested - otherwise the DB keeps drifting further from the
+    wallet every time this happens."""
+    tp = _live_config_trade(id=2, token_address="MintTP", purchased_token_amount=1000.0)
+    harness.trades = [tp]
+    harness.prices = {"MintTP": 2.33}  # requests 10% of 1000 = 100 tokens
+    harness.balances = {"MintTP": 60_000_000}  # only 60 tokens actually on-chain
+
+    harness.run_cycle()
+
+    assert _quoted_amounts(harness) == [60_000_000]  # capped to the real balance
+    assert harness.history.call_args.kwargs["amount"] == pytest.approx(60.0)
+    assert tp.purchased_token_amount == pytest.approx(940.0)  # 1000 - 60, not 1000 - 100
 
 
 def test_loop_zero_wallet_balance_skips_without_quoting(harness):
@@ -683,6 +757,42 @@ def test_loop_prices_are_fetched_in_parallel(harness):
 
     assert len([e for e in harness.events if e[0] == "priced"]) == 8
     assert elapsed < 1.5  # sequential would take 8 x 0.5s = 4s
+
+
+def test_loop_send_pool_refetches_trade_by_id_not_cross_thread_object(harness):
+    """Regression: a real (non-mocked) SQLAlchemy session refuses to refresh
+    an ORM object that was loaded by a DIFFERENT thread's session - the send
+    pool must re-fetch each Trade by id on its own thread's app context
+    rather than reusing the object the cycle thread already loaded. This
+    doesn't exercise the real session (the harness mocks db.session, which
+    never actually raises), so the only way to lock in the fix here is to
+    assert the re-fetch itself happens, by id, for every trade sent."""
+    tp = _live_config_trade(id=123, token_address="MintTP")
+    harness.trades = [tp]
+    harness.prices = {"MintTP": 2.33}
+
+    harness.run_cycle()
+
+    sell_script.Trade.query.get.assert_any_call(123)
+
+
+def test_loop_sends_run_concurrently_not_one_at_a_time(harness):
+    """Regression (C12): sends (quote + swap + send_transaction) used to run
+    one at a time on the cycle thread - a slow quote for one trade delayed
+    every other trade's stop-loss/take-profit behind it. All 6 trades here
+    hit stop-loss (an immediate full-exit sell), each with a slow quote;
+    sequential would take 6 x 0.4s = 2.4s."""
+    harness.trades = [_live_config_trade(id=i, token_address=f"MintSlow{i}") for i in range(6)]
+    harness.prices = {f"MintSlow{i}": 0.5 for i in range(6)}  # below stop-loss: sells immediately
+    harness.quote_delays = {f"MintSlow{i}": 0.4 for i in range(6)}
+
+    with patch.object(sell_script, "SNIPER_SELL_SEND_WORKERS", 6):
+        start = time.monotonic()
+        harness.run_cycle()
+        elapsed = time.monotonic() - start
+
+    assert harness.sent == 6
+    assert elapsed < 1.5  # sequential would take 6 x 0.4s = 2.4s
 
 
 def test_loop_fast_priced_trade_sells_before_slow_price_arrives(harness):

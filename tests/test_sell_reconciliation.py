@@ -61,7 +61,7 @@ def harness():
     trade_model = MagicMock()
     trade_model.query.get.side_effect = lambda tid: h.trades.get(tid)
 
-    def _get_statuses(sigs):
+    def _get_statuses(sigs, **kwargs):
         return SimpleNamespace(value=[h.statuses.get(sigs[0])])
 
     solana_mock = MagicMock()
@@ -98,6 +98,27 @@ def test_confirmed_sell_marked_confirmed_trade_left_alone(harness):
     assert history.status == "confirmed"
     assert trade.purchased_token_amount == 0.0
     assert trade.executed is True
+
+
+def test_signature_status_lookup_uses_search_transaction_history(harness):
+    """Regression guard: without search_transaction_history=True, the RPC
+    node's short-lived recent-status cache can evict an older signature and
+    return None even for a transaction that actually landed, eventually
+    "restoring" a sell that actually succeeded (a phantom open position).
+    Matches the equivalent guard on the buy-side reconcile."""
+    history = _history(tx_id="sig1")
+    trade = _trade(id=1)
+    harness.history_rows = [history]
+    harness.trades = {1: trade}
+    harness.statuses = {"sig1": _status()}
+
+    with patch.object(
+        sell_script.solana_client, "get_signature_statuses",
+        wraps=lambda sigs, **kw: SimpleNamespace(value=[harness.statuses.get(sigs[0])]),
+    ) as get_statuses:
+        sell_script.reconcile_pending_sells(harness.app)
+
+    assert get_statuses.call_args.kwargs.get("search_transaction_history") is True
 
 
 def test_finalized_also_counts_as_confirmed(harness):
@@ -209,7 +230,7 @@ def test_status_lookup_failure_leaves_row_pending_for_next_run(harness):
     harness.history_rows = [history]
     harness.trades = {1: trade}
 
-    def _boom(sigs):
+    def _boom(sigs, **kwargs):
         raise RuntimeError("RPC down")
 
     with patch.object(sell_script.solana_client, "get_signature_statuses", side_effect=_boom):

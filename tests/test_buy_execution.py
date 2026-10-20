@@ -106,7 +106,12 @@ def harness(tmp_path):
     wallet = SimpleNamespace(public_key=str(_FakeVersionedTx.wallet_pubkey), private_key=str(key_file))
     wallet_model = MagicMock()
     wallet_model.query.filter_by.return_value.first.return_value = wallet
+    # Also covers the deterministic fallback path (.order_by(Wallet.id.asc()).first()).
+    wallet_model.query.filter_by.return_value.order_by.return_value.first.return_value = wallet
     h.trade_model = MagicMock()
+    # No existing AUTOSNIPE trade for this (user, mint) by default (the B10
+    # dedup check) - individual tests override this to simulate a duplicate.
+    h.trade_model.query.filter_by.return_value.first.return_value = None
     h.logger = MagicMock()
     h.latency = MagicMock()
     buy.BOUGHT_TOKENS.clear()
@@ -219,11 +224,13 @@ def test_quote_failure_does_not_block_a_later_attempt(harness):
 
 
 def test_latency_line_has_every_stage(harness):
+    # No token_details stage: token name/symbol are static ("Unknown"), not
+    # fetched (from Shyft or anywhere else), so there's no lookup to time.
     buy.buy_token(MINT, _config(), decision_ms=1234.5)
     line = _latency_lines(harness)[0]
     assert line.startswith("[latency] path=buy")
     assert f"mint={MINT}" in line and "outcome=sent" in line and "sig=sig1" in line
-    for stage in ("decision=1234.5", "lock_wait=", "token_details=", "balance=", "quote=", "swap=", "send=", "db=", "total="):
+    for stage in ("decision=1234.5", "lock_wait=", "balance=", "quote=", "swap=", "send=", "db=", "total="):
         assert stage in line, stage
 
 

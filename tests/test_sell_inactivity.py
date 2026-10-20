@@ -308,7 +308,8 @@ def test_inactivity_trigger_mixed_thresholds_on_shared_mint_fire_independently(h
 
 def test_inactivity_trigger_missing_fields_fall_back_to_global_default(harness):
     """A trade from before this field existed (None on both) behaves exactly
-    like the previous global-only implementation: enabled, 5s threshold."""
+    like the global-only implementation: enabled, SNIPER_SELL_INACTIVITY_SEC
+    (5s) threshold."""
     trade = _live_config_trade(
         id=49, token_address="MintLegacy", purchased_token_amount=1000.0,
         inactivity_sell_enabled=None, inactivity_sell_seconds=None,
@@ -331,6 +332,7 @@ def test_inactivity_trigger_does_not_touch_take_profit_tier_bookkeeping(harness)
 
     sell_script._run_inactivity_check(harness.app, "MintDead", 5.0)
 
+    assert harness.sent == 1  # confirms the exit actually fired, not just a no-op
     assert trade.tp_pct_sold == 10  # unchanged
     assert trade.last_tp_tier == 2.0  # unchanged
 

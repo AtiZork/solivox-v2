@@ -674,6 +674,24 @@ async def _pump_fun_ws_loop() -> None:
                 url_index = 0
                 logger.info("[WS] Subscribed to Pump.fun logs via %s (id=%s)", ws_url, sub_id)
 
+                # mint_sub_ids/sub_id_by_mint above are fresh, empty dicts for
+                # this connection - any mint still inside its buy-decision
+                # window from before a reconnect would otherwise never get
+                # re-subscribed, so its buy stream silently goes dead and it
+                # gets wrongly rejected for "not enough buys" for the rest of
+                # its window. Re-queues every mint stream_state still tracks
+                # and sends them immediately rather than waiting for the next
+                # incoming message to trigger the normal drain.
+                still_tracked = stream_state.get_tracked_mint_set()
+                if still_tracked:
+                    for mint in still_tracked:
+                        mint_subscribe_queue.put_nowait(mint)
+                    logger.info(
+                        "[WS] Re-subscribing %d mint(s) still in their buy window after (re)connect.",
+                        len(still_tracked),
+                    )
+                    await drain_mint_subscribe_queue(ws)
+
                 if _on_connected and not _connected_callback_fired:
                     _connected_callback_fired = True
                     try:
