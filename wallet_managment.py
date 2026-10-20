@@ -43,9 +43,14 @@ def create_wallet():
         private_key_filename = f"{secrets.token_hex(16)}.key"  # Generates a random 16-byte filename
         private_key_path = os.path.join(secure_directory, private_key_filename)
 
-        # Store the private key in a file
+        # Store the private key in a file, then restrict it to the owner only
+        # (attach_wallet/recover_wallet already do this; create_wallet didn't).
         with open(private_key_path, 'wb') as key_file:
             key_file.write(private_key)
+        try:
+            os.chmod(private_key_path, 0o600)
+        except OSError:
+            pass  # not supported on this filesystem (e.g. some Windows setups)
 
         # Store the path in the database instead of the private key
         new_wallet = Wallet(public_key=str(public_key), private_key_path=private_key_path, user_id=user_id, title=title)
@@ -55,7 +60,6 @@ def create_wallet():
         return jsonify({
             "status": "success",
             "recovery_phrase": recovery_phrase,  # Store securely!
-            "private_key_path": private_key_path,  # Return path of private key file
             "public_key": str(public_key),
             "user":user_id,
             "message": "wallet created successfully"
@@ -87,6 +91,7 @@ def get_wallets():
 
 
 @wallet_bp.route('/check_balance', methods=['POST'])
+@jwt_required()
 def check_balance():
     public_key = request.json['public_key']
     balance = solana_client.get_balance(Pubkey.from_string(public_key))
@@ -99,9 +104,11 @@ add amount in wallet
 
 
 @wallet_bp.route("/fund_wallet", methods=["POST"])
+@jwt_required()
 def fund_wallet():
     """Funds a wallet using Solana's testnet airdrop with dynamic SOL amount."""
     try:
+        user_id = get_jwt_identity()
         data = request.get_json()
         public_key = data.get("public_key")
         amount = data.get("amount")
@@ -119,7 +126,7 @@ def fund_wallet():
         response = solana_client.request_airdrop(pubkey, lamports)
 
         if "result" in response:
-            existing_wallet = Wallet.query.filter_by(public_key=public_key).first()
+            existing_wallet = Wallet.query.filter_by(public_key=public_key, user_id=user_id).first()
             if existing_wallet:
                 existing_wallet.balance += amount
                 db.session.commit()
@@ -278,7 +285,6 @@ def attach_wallet():
             "status": "success",
             "message": "Wallet attached successfully",
             "public_key": public_key_str,
-            "private_key_path": private_key_path  # Only return path, not the actual key
         }), 200
 
     except Exception as e:
@@ -362,7 +368,6 @@ def recover_wallet():
             "status": "success",
             "message": "Wallet recovered and attached successfully",
             "public_key": public_key_str,
-            "private_key_path": private_key_path  # Only store the path, not the key itself
         }), 200
 
     except Exception as e:

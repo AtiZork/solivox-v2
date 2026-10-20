@@ -5,6 +5,7 @@ from models import db, Wallet, Trade, TradeLog, TradeHistory
 import requests
 import base64
 from flask import jsonify, Blueprint, request
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from requests import JSONDecodeError
 from solders.solders import VersionedTransaction
 from solders.keypair import Keypair as SoldersKeypair
@@ -76,9 +77,13 @@ def get_token_balance(wallet_address, token_mint):
 
 
 @manual_sell_trade_bp.route('/sell_token/<int:trade_id>/', methods=['PUT'])
+@jwt_required()
 def sell_token(trade_id):
     try:
-        last_trade = Trade.query.filter_by(id=trade_id).first()
+        user_id = get_jwt_identity()
+        last_trade = Trade.query.filter_by(id=trade_id, user_id=user_id).first()
+        if not last_trade:
+            return jsonify({"status": "failed", "message": "Trade not found"}), 404
         token_address = last_trade.token_address
         to_pubkey = last_trade.to_pubkey
         # balance = get_token_balance(to_pubkey, token_address)
@@ -121,7 +126,7 @@ def sell_token(trade_id):
             return jsonify({"status": "failed", "message": "Sell token amount greater then available tokens"}), 400
         current_token_price_ = get_token_price(token_address)
         current_token_price = current_token_price_["usdPrice"]
-        wallet = Wallet.query.filter_by(public_key=to_pubkey).first()
+        wallet = Wallet.query.filter_by(public_key=to_pubkey, user_id=user_id).first()
         private_key_path = wallet.private_key
         if not os.path.exists(private_key_path):
             return jsonify({"status": "failed", "message": "Failed to fetch private key"}), 400
