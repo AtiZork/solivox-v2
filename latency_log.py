@@ -19,6 +19,7 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Optional
 
 from settings import LATENCY_SUMMARY_INTERVAL_SEC
@@ -70,6 +71,19 @@ class StageTimer:
         if reason is not None:
             self.reason = reason
         logger.info(self.line())
+        # Feeds the throttled aggregators below (dashboard 3.3) in addition to
+        # the log line above, not instead of it - every buy/sell attempt
+        # already builds this breakdown, so this is just also recording it
+        # somewhere queryable instead of only a text log.
+        stats = _PATH_STATS.get(self.path)
+        if stats is not None:
+            for stage, ms in self.stages.items():
+                stats.record(stage, ms)
+            # "total" is computed for the log line above but never added to
+            # self.stages, so it has to be recorded separately here - the
+            # dashboard's "current buy/sell total avg" figure (3.5) reads
+            # this exact stage name back out.
+            stats.record("total", (time.monotonic() - self._start) * 1000)
 
 
 class StageStats:
@@ -82,6 +96,7 @@ class StageStats:
         self._durations: dict[str, list] = {}  # stage -> [count, total_ms, max_ms]
         self._counts: dict[str, int] = {}
         self._last_flush = time.monotonic()
+        self._last_flush_wall = datetime.utcnow()
 
     def record(self, stage: str, ms: float) -> None:
         with self._lock:
@@ -103,22 +118,50 @@ class StageStats:
                 "counts": dict(self._counts),
             }
 
-    def maybe_flush(self, force: bool = False) -> None:
+    def flush_and_return(self, force: bool = False) -> Optional[dict]:
+        """Same threshold/reset logic maybe_flush always had, but returns the
+        flushed snapshot (with wall-clock window bounds) instead of only
+        logging it - lets a caller persist it (dashboard 3.3) without this
+        module itself depending on a DB. maybe_flush below is now just the
+        logging caller of this."""
         if self.interval_sec <= 0 and not force:
-            return
+            return None
         with self._lock:
             now = time.monotonic()
             if not force and now - self._last_flush < self.interval_sec:
-                return
+                return None
             durations, counts = self._durations, self._counts
             self._durations, self._counts = {}, {}
-            window = now - self._last_flush
+            window_start, window_end = self._last_flush_wall, datetime.utcnow()
+            window_sec = now - self._last_flush
             self._last_flush = now
+            self._last_flush_wall = window_end
         if not durations and not counts:
+            return None
+        return {
+            "window_sec": window_sec,
+            "window_start": window_start,
+            "window_end": window_end,
+            "durations": durations,
+            "counts": counts,
+        }
+
+    def maybe_flush(self, force: bool = False) -> None:
+        result = self.flush_and_return(force=force)
+        if result is None:
             return
-        parts = [f"[latency-summary] {self.name} window={window:.0f}s"]
-        for stage, (n, total, peak) in sorted(durations.items()):
+        parts = [f"[latency-summary] {self.name} window={result['window_sec']:.0f}s"]
+        for stage, (n, total, peak) in sorted(result["durations"].items()):
             parts.append(f"{stage}(n={n} avg={total / n:.1f} max={peak:.1f})")
-        for key, n in sorted(counts.items()):
+        for key, n in sorted(result["counts"].items()):
             parts.append(f"{key}={n}")
         logger.info(" ".join(parts))
+
+
+# Fed by every buy/sell StageTimer.finish() (dashboard 3.3) - throttled,
+# in-memory aggregation reused as-is from the sniper WS stream's own
+# rpc_stats, rather than writing one DB row per attempt (busy sniper periods
+# evaluate many tokens/sec, which a per-event write would not handle well).
+buy_stats = StageStats("buy")
+sell_stats = StageStats("sell")
+_PATH_STATS = {"buy": buy_stats, "sell": sell_stats}

@@ -112,16 +112,19 @@ def harness(tmp_path):
     # No existing AUTOSNIPE trade for this (user, mint) by default (the B10
     # dedup check) - individual tests override this to simulate a duplicate.
     h.trade_model.query.filter_by.return_value.first.return_value = None
+    h.trade_history_model = MagicMock()
     h.logger = MagicMock()
     h.latency = MagicMock()
+    h.db = MagicMock()
+    h.requests = requests_mock
     buy.BOUGHT_TOKENS.clear()
 
     with patch.object(buy, "solana_client", client), \
          patch.object(buy, "requests", requests_mock), \
          patch.object(buy, "Wallet", wallet_model), \
          patch.object(buy, "Trade", h.trade_model), \
-         patch.object(buy, "TradeHistory", MagicMock()), \
-         patch.object(buy, "db", MagicMock()), \
+         patch.object(buy, "TradeHistory", h.trade_history_model), \
+         patch.object(buy, "db", h.db), \
          patch.object(buy, "VersionedTransaction", _FakeVersionedTx), \
          patch.object(buy, "get_token_price", return_value={"usdPrice": 1e-6, "name": "N", "symbol": "S"}), \
          patch.object(buy, "get_shyft_pricing_service", return_value=MagicMock(
@@ -167,8 +170,87 @@ def test_preflight_rejection_is_reported_not_crashed(harness, err_json, expected
     assert f"Buy transaction for {MINT} rejected" in logged
     assert expected in logged
     assert "incorrect program id" in logged  # the failing program log line
-    harness.trade_model.assert_not_called()  # no Trade row for a rejected buy
+    # The Trade row is written before send (action-plan 1.4a) and is kept
+    # even though this send raised: the error doesn't prove the transaction
+    # never landed, so deleting the row here could erase the only record of
+    # a buy that actually went through. Only the TradeHistory row (which
+    # needs a real signature) is skipped for this outcome.
+    harness.trade_model.assert_called_once()
+    harness.trade_history_model.assert_not_called()
     assert "outcome=send_rejected" in _latency_lines(harness)[0]
+
+
+def test_trade_row_is_written_before_the_swap_is_even_built(harness):
+    """Action-plan 1.4a: the Trade row used to be created only after
+    send_transaction succeeded, so a real on-chain buy with a DB write that
+    failed afterward left tokens in the wallet with no Trade row at all. It's
+    now written right after the quote (before the swap transaction is even
+    fetched), using the fields that step already has - never after send."""
+    assert buy.buy_token(MINT, _config()) is True
+    harness.trade_model.assert_called_once()
+    kwargs = harness.trade_model.call_args.kwargs
+    assert kwargs["purchased_token_amount"] == 1000.0  # from the quote's outAmount
+    assert kwargs["initial_token_amount"] == 1000.0
+
+
+def test_swap_setup_failure_deletes_the_just_written_pending_trade(harness):
+    """Unlike a rejected send (which may have landed despite the error - see
+    test_preflight_rejection_is_reported_not_crashed), a failure while
+    building/fetching the swap transaction happens strictly before anything
+    is ever sent on-chain. Nothing could have landed, so the pending Trade
+    row written right after the quote must be cleaned up rather than left
+    behind as a phantom position."""
+    harness.requests.post.return_value = _response(500, {"error": "swap service down"})
+
+    assert buy.buy_token(MINT, _config()) is True
+
+    harness.trade_model.assert_called_once()  # written right after the quote
+    created_trade = harness.trade_model.return_value
+    harness.db.session.delete.assert_called_once_with(created_trade)
+    harness.trade_history_model.assert_not_called()  # no signature was ever obtained
+    assert harness.sent == []  # send_transaction was never reached
+
+
+def test_open_autosnipe_trade_for_mint_skips_the_buy(harness):
+    """B10/action-plan 1.3: an existing OPEN AUTOSNIPE trade for this (user,
+    mint) blocks a rebuy - the dedup query must filter on executed=False,
+    matching the DB-level partial unique index's own scope."""
+    harness.trade_model.query.filter_by.return_value.first.return_value = SimpleNamespace(id=99)
+
+    assert buy.buy_token(MINT, _config()) is False
+
+    harness.trade_model.query.filter_by.assert_any_call(
+        user_id=1, token_address=MINT, auto_snipe=True, executed=False
+    )
+    assert harness.sent == []
+
+
+def test_closed_autosnipe_trade_for_mint_allows_a_rebuy(harness):
+    """Action-plan 1.3 deliberately scoped the dedup to open positions, not
+    forever: once a position is fully closed (executed=True), the mint is
+    tradable again. The query above already filters executed=False, so a
+    closed row simply never matches - this proves the buy still goes
+    through when the mock's default (no match) represents that."""
+    harness.trade_model.query.filter_by.return_value.first.return_value = None
+
+    assert buy.buy_token(MINT, _config()) is True
+
+    assert len(harness.sent) == 1
+
+
+def test_integrity_error_on_pending_trade_commit_is_treated_as_duplicate(harness):
+    """Defense in depth (action-plan 1.3) for a race the query check and
+    WALLET_BUY_LOCK should already prevent: if the DB's own partial unique
+    index ever rejects the insert anyway, it's reported as a duplicate, not
+    a crash, and nothing downstream (swap/send) is ever reached."""
+    from sqlalchemy.exc import IntegrityError
+    harness.db.session.commit.side_effect = IntegrityError("duplicate key", {}, BaseException())
+
+    assert buy.buy_token(MINT, _config()) is False
+
+    assert harness.sent == []
+    assert harness.requests.post.call_count == 0  # swap was never reached
+    harness.db.session.rollback.assert_called_once()
 
 
 def test_describe_send_error_handles_plain_exceptions():

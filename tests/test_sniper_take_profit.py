@@ -687,18 +687,59 @@ def test_failed_send_retries_after_short_cooldown(harness):
     assert 5 not in sell_script._retry_after
 
 
-def test_db_failure_after_send_backs_off_instead_of_reselling(harness):
+def test_db_failure_after_send_leaves_sell_pending_and_blocks_a_resell(harness):
+    """
+    Action-plan 1.4b: send_transaction succeeds (first commit, the pre-send
+    sell_pending marker, goes through) but the bigger commit that would
+    record the sale and update trade_data's bookkeeping fails. The second
+    cycle must not re-evaluate this trade and send a second real transaction
+    for tokens already sold.
+
+    This mocked harness can't model real SQLAlchemy rollback semantics (a
+    failed commit here leaves the SimpleNamespace's in-memory attributes as
+    this call last set them, not reverted) - see the C12 cross-thread-session
+    test for the same caveat - so it can only prove the pre-send marker is
+    committed in its own call before the send, not that sell_pending durably
+    survives the rollback. That durability is what reconcile_stuck_sell_pending
+    then resolves against the wallet's real balance.
+    """
     tp = _live_config_trade(id=6, token_address="MintTP")
     harness.trades = [tp]
     harness.prices = {"MintTP": 2.33}
-    harness.db.session.commit.side_effect = RuntimeError("db down")
+
+    calls = {"n": 0}
+
+    def _commit():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("db down")
+
+    harness.db.session.commit.side_effect = _commit
 
     harness.run_cycle()
     harness.run_cycle()
 
     assert harness.sent == 1  # the second cycle must not sell again on the stale row
     assert "but DB update failed" in _logged(harness, "error")
-    assert sell_script._retry_after[6] > time.monotonic() + 50
+    assert calls["n"] == 2  # the pre-send marker commit, then the (failed) post-send one
+
+
+def test_persistent_db_failure_prevents_any_send(harness):
+    """
+    If even the lightweight pre-send sell_pending marker can't be
+    committed, the DB is in no shape to track a sell safely - the bot must
+    not send at all. Missing a sell is recoverable; sending money it can
+    never record is not.
+    """
+    tp = _live_config_trade(id=7, token_address="MintTP2")
+    harness.trades = [tp]
+    harness.prices = {"MintTP2": 2.33}
+    harness.db.session.commit.side_effect = RuntimeError("db down")
+
+    harness.run_cycle()
+
+    assert harness.sent == 0
+    assert "not sending" in _logged(harness, "error")
 
 
 def test_loop_failed_send_does_not_record_sale(harness):

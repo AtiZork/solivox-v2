@@ -33,9 +33,20 @@ def _clean_inactivity_state():
 # --- check_inactivity(): deciding what's overdue ---------------------------
 
 
-def _connected_stream(connected=True):
+class _AlwaysSubscribed(dict):
+    """Stand-in for SellStream.subscribed where every mint is considered
+    live-subscribed by default, so existing tests of the inactivity timing
+    logic itself don't need to know about the per-mint subscription check
+    (action-plan 1.6) unless they're specifically testing it."""
+
+    def __contains__(self, _key):
+        return True
+
+
+def _connected_stream(connected=True, subscribed=None):
     stream = MagicMock()
     stream.connected = connected
+    stream.subscribed = _AlwaysSubscribed() if subscribed is None else subscribed
     return stream
 
 
@@ -77,6 +88,86 @@ def test_mint_past_threshold_fires(harness):
     assert args[0] is sell_script._run_inactivity_check
     assert args[2] == "MintDead"
     assert args[3] >= 6
+
+
+# --- Action-plan 1.6: per-mint subscription liveness -----------------------
+
+
+def test_mint_past_threshold_but_not_subscribed_does_not_fire(harness):
+    """
+    The stream overall is connected, but this ONE mint has no live
+    subscription (a buy SellStream hasn't synced in yet, or a subscribe
+    request that silently failed) - silence here means "we can't hear this
+    mint", not "it stopped trading", so it must not force-sell even though
+    elapsed time is well past the threshold.
+    """
+    sell_script._sell_stream = _connected_stream(subscribed={})  # mint not in it
+    sell_script._stream_was_connected = True
+    sell_script._last_activity["MintUnsubbed"] = time.monotonic() - 6  # > 5s default
+    with patch.object(
+        sell_script, "_open_trades_inactivity_settings", return_value={"MintUnsubbed": [(True, 5.0)]}
+    ), patch.object(sell_script._instant_pool, "submit") as submit:
+        sell_script.check_inactivity(harness.app)
+
+    submit.assert_not_called()
+
+
+def test_unsubscribed_mint_resets_its_activity_timer(harness):
+    """Its clock restarts rather than keeping stale elapsed time, so it
+    doesn't immediately fire the moment the subscription catches up."""
+    sell_script._sell_stream = _connected_stream(subscribed={})
+    sell_script._stream_was_connected = True
+    sell_script._last_activity["MintUnsubbed"] = time.monotonic() - 6
+    with patch.object(
+        sell_script, "_open_trades_inactivity_settings", return_value={"MintUnsubbed": [(True, 5.0)]}
+    ):
+        sell_script.check_inactivity(harness.app)
+
+    assert time.monotonic() - sell_script._last_activity["MintUnsubbed"] < 1.0
+
+
+def test_unsubscribed_mint_warns_only_if_it_was_previously_subscribed(harness):
+    """A brand new mint (never tracked before) is a normal, expected gap
+    right after a buy - no warning. A mint that WAS subscribed and silently
+    isn't anymore is worth flagging."""
+    sell_script._sell_stream = _connected_stream(subscribed={})
+    sell_script._stream_was_connected = True
+    with patch.object(
+        sell_script, "_open_trades_inactivity_settings", return_value={"MintBrandNew": [(True, 5.0)]}
+    ), patch.object(sell_script, "logger") as mock_logger:
+        sell_script.check_inactivity(harness.app)
+    mock_logger.warning.assert_not_called()
+
+    sell_script._last_activity["MintWasTracked"] = time.monotonic() - 1
+    with patch.object(
+        sell_script, "_open_trades_inactivity_settings", return_value={"MintWasTracked": [(True, 5.0)]}
+    ), patch.object(sell_script, "logger") as mock_logger:
+        sell_script.check_inactivity(harness.app)
+    mock_logger.warning.assert_called_once()
+    assert "no live subscription" in str(mock_logger.warning.call_args)
+
+
+def test_mint_resubscribed_after_being_unsubscribed_fires_normally(harness):
+    """Once SellStream catches up and the mint reappears in .subscribed,
+    the normal timing rule applies again with no lingering effect from the
+    earlier gap."""
+    subscribed = {}
+    sell_script._sell_stream = _connected_stream(subscribed=subscribed)
+    sell_script._stream_was_connected = True
+    with patch.object(
+        sell_script, "_open_trades_inactivity_settings", return_value={"MintCatchUp": [(True, 5.0)]}
+    ):
+        sell_script.check_inactivity(harness.app)  # unsubscribed: seeds/resets the timer
+
+    subscribed["MintCatchUp"] = 123  # SellStream's own resync catches up
+    sell_script._last_activity["MintCatchUp"] = time.monotonic() - 6
+    with patch.object(
+        sell_script, "_open_trades_inactivity_settings", return_value={"MintCatchUp": [(True, 5.0)]}
+    ), patch.object(sell_script._instant_pool, "submit") as submit:
+        sell_script.check_inactivity(harness.app)
+
+    submit.assert_called_once()
+    assert submit.call_args.args[2] == "MintCatchUp"
 
 
 def test_firing_resets_timer_so_it_does_not_refire_every_tick(harness):

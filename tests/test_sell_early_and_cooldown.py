@@ -85,8 +85,12 @@ def test_still_empty_after_grace_backs_off_long(harness, latency):
     (lambda h: setattr(h, "send_error", "Blockhash not found"), "failed", "send_rejected"),
     (lambda h: h.quote_status.update({"MintR": 400}), "empty", "quote_NO_ROUTES_FOUND"),
     (lambda h: h.balances.update({"MintR": RuntimeError("rpc down")}), "failed", "balance_read_failed"),
+    # A DB that can't even commit the pre-send sell_pending marker (action-
+    # plan 1.4b) is refused a send entirely, rather than sending and only
+    # then discovering it can't be recorded - see test_sniper_take_profit's
+    # test_persistent_db_failure_prevents_any_send for the full scenario.
     (lambda h: setattr(h.db.session.commit, "side_effect", RuntimeError("db down")),
-     "empty", "db_update_failed_after_send"),
+     "failed", "sell_pending_marker_failed"),
 ])
 def test_cooldown_reason_is_logged(harness, latency, setup, outcome, reason):
     trade = _live_config_trade(id=23, token_address="MintR")
@@ -217,6 +221,23 @@ def test_no_latency_line_while_cooling(harness, latency):
 
     assert harness.sent == 0
     assert _lines(latency) == []
+
+
+def test_full_exit_of_an_autosnipe_trade_frees_the_mint_for_a_rebuy(harness):
+    """Action-plan 1.3: closing an AUTOSNIPE position out fully must clear
+    the in-memory buy-dedup fast path (BOUGHT_TOKENS), not just the DB row's
+    executed flag - otherwise a legitimate rebuy of this mint later in the
+    same process run would stay blocked until a restart happened to clear
+    it, even though the new open-positions-only dedup scope allows it."""
+    trade = _live_config_trade(id=32, token_address="MintFullExit", auto_snipe=True, user_id=9)
+    harness.trades = [trade]
+    harness.prices = {"MintFullExit": 0.69}  # below the 30% stop-loss cutoff: sells 100%
+
+    with patch.object(sell_script, "mark_autosnipe_position_closed") as mark_closed:
+        harness.run_cycle()
+
+    assert trade.executed is True
+    mark_closed.assert_called_once_with(9, "MintFullExit")
 
 
 def test_unusable_price_is_warned_about_once_then_deduped(harness):

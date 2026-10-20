@@ -2,7 +2,6 @@ from flask_jwt_extended import JWTManager
 
 from autosnipe import autosnipe_bp
 from autosnipe_buy_new_token import autosnipe_trade_bp
-from autosnipe_logic import start_background_jobs
 from charts import charts_bp
 # from long_sell_trade import sell_trade_bp
 from models import db, TradeLog
@@ -18,6 +17,8 @@ from live_pricing import live_pricing_bp
 from menual_sell_token import manual_sell_trade_bp
 from flask_socketio import SocketIO
 from trade_history import trade_history_bp
+from trades_api import trades_api_bp
+from dashboard_api import dashboard_api_bp
 import os
 # for live
 # app = Flask(__name__, static_folder='/home/ubuntu/solivox-v2/static')
@@ -79,6 +80,8 @@ with app.app_context():
                 ("inactivity_sell_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
                 ("inactivity_sell_seconds", "DOUBLE PRECISION NOT NULL DEFAULT 5"),
                 ("peak_price", "DOUBLE PRECISION"),
+                ("sell_pending", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("sell_pending_since", "TIMESTAMP"),
             ],
             "trade_history": [
                 ("status", "VARCHAR(20) NOT NULL DEFAULT 'confirmed'"),
@@ -102,7 +105,53 @@ with app.app_context():
         except Exception as exc:
             print(f"[DB] ensure sniper enable columns skipped: {exc}")
 
+    def _ensure_open_autosnipe_dedup_index():
+        """
+        Creates the partial unique index backing the open-position buy-dedup
+        check (action-plan 1.3) on an already-existing "trade" table -
+        db.create_all() above only adds indexes for a brand new table, not a
+        missing one on a table that already exists. Matches models.py's
+        Trade.__table_args__ exactly, so a fresh DB gets the same index via
+        create_all() and this is a no-op there.
+
+        Guarded against pre-existing duplicate (user_id, token_address) open
+        AUTOSNIPE rows: there was exactly one in production (from before the
+        B10 dedup check existed - see NOT_DONE_FIXES.md 1.3), which this
+        index's own open-positions-only scope already resolves since one of
+        that pair was already sold. If duplicates are ever found anyway,
+        this logs loudly and skips creating the index rather than crashing
+        startup - an unenforced dedup is the pre-existing risk, not a new one.
+        """
+        from sqlalchemy import inspect, text
+
+        index_name = "ix_trade_open_autosnipe_user_mint"
+        try:
+            insp = inspect(db.engine)
+            if "trade" not in insp.get_table_names():
+                return
+            if index_name in {ix["name"] for ix in insp.get_indexes("trade")}:
+                return
+            with db.engine.begin() as conn:
+                dupes = conn.execute(text(
+                    'SELECT user_id, token_address, COUNT(*) FROM trade '
+                    'WHERE auto_snipe = true AND executed = false '
+                    'GROUP BY user_id, token_address HAVING COUNT(*) > 1'
+                )).fetchall()
+                if dupes:
+                    print(
+                        f"[DB] skipping {index_name}: {len(dupes)} pre-existing duplicate "
+                        f"open-AUTOSNIPE group(s) found: {dupes}"
+                    )
+                    return
+                conn.execute(text(
+                    f'CREATE UNIQUE INDEX {index_name} ON "trade" (user_id, token_address) '
+                    'WHERE auto_snipe = true AND executed = false'
+                ))
+        except Exception as exc:
+            print(f"[DB] ensure {index_name} skipped: {exc}")
+
     _ensure_sniper_enable_columns()
+    _ensure_open_autosnipe_dedup_index()
 
 
 def get_logs_from_db():
@@ -153,6 +202,11 @@ def dashboard():
     return render_template("dashboard.html")
 
 
+@app.route("/performance")
+def performance():
+    return render_template("performance.html")
+
+
 app.register_blueprint(solana_bp)
 # app.register_blueprint(sell_trade_bp)
 app.register_blueprint(manual_sell_trade_bp)
@@ -166,6 +220,8 @@ app.register_blueprint(token_price_bp)
 app.register_blueprint(user_register_bp)
 app.register_blueprint(autosnipe_trade_bp)
 app.register_blueprint(live_pricing_bp)
+app.register_blueprint(trades_api_bp)
+app.register_blueprint(dashboard_api_bp)
 
 # app.register_blueprint(solana_auto_snipe_bp)
 
@@ -175,14 +231,11 @@ from trades_ws import *
 # create_scheduler(app)
 # from  autosnipe_sell_script import auto_snipe_auto_sell_schedular
 # auto_snipe_auto_sell_schedular(app)
-# from  autosnipe_buy_script import  auto_buy_token
-# auto_buy_token(app)
 # from long_sell_trade import long_auto_sell_schedular
 # long_auto_sell_schedular(app)
 
 # Press the green button in the gutter to run the script.
 if __name__ == "__main__":
-   # start_background_jobs()
     # for production
    # socketio.run(app, host="0.0.0.0", port=8000)
     # for development
@@ -196,10 +249,6 @@ if __name__ == "__main__":
 
        auto_snipe_auto_sell_schedular(app)
 
-       # from autosnipe_buy_script import auto_buy_token
-       #
-       # auto_buy_token(app)
-
        from long_sell_trade import long_auto_sell_schedular
 
        long_auto_sell_schedular(app)
@@ -207,6 +256,10 @@ if __name__ == "__main__":
        from autosnipe_buy_new_token import start_sniper_ingestion
 
        start_sniper_ingestion()
+
+       from dashboard_models import start_latency_snapshot_scheduler
+
+       start_latency_snapshot_scheduler(app)
    # debug=False (NOT True) — debug=True wires in Werkzeug's interactive
    # debugger (evalex=True), which lets anyone who can trigger an unhandled
    # error on this publicly-bound (0.0.0.0) server execute arbitrary Python

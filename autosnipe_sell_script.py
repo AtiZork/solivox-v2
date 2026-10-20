@@ -43,6 +43,7 @@ from yellowstone_pricing import YellowstonePricingError, get_yellowstone_price, 
 from solders.pubkey import Pubkey
 from apscheduler.schedulers.background import BackgroundScheduler
 from autosnipe_sell_logic import evaluate_autosnipe_sell, SellDecision
+from autosnipe_buy_new_token import mark_autosnipe_position_closed
 
 log_messages = []
 
@@ -282,6 +283,14 @@ def _sell_if_due(
     shown in the sell-decision log line. Used by the inactivity rule.
     """
     timer = timer or StageTimer("sell", trade=trade_data.id)
+    if getattr(trade_data, "sell_pending", False):
+        # A previous attempt's send may have succeeded on-chain while the DB
+        # write recording it failed (see the pre-send marker below) - nothing
+        # here can tell whether that happened, so evaluating a fresh decision
+        # risks firing the same tier again for tokens already sold.
+        # reconcile_stuck_sell_pending resolves this against the wallet's
+        # real balance on its own schedule; just wait for it.
+        return "cooling"
     if not current_price or current_price <= 0:
         # Visible on purpose: a migrated token priced against a non-SOL,
         # non-USDC quote asset (see shyft_pricing.get_pumpswap_pool_price)
@@ -469,11 +478,37 @@ def _sell_if_due(
         signers[wallet_index] = wallet_keypair
         signed_transaction = VersionedTransaction(raw_transaction.message, signers)
 
+        # Durable marker written before the send, not after (action-plan
+        # 1.4b): if send_transaction succeeds but the commit below (which
+        # records the outcome) then fails, this is the only thing that
+        # survives to say "a send already happened here" - without it, a
+        # retry has no way to know and could fire the same tier again for
+        # tokens already sold. Cheap and isolated on purpose: if even this
+        # can't be committed, the DB is in no shape to track a sell safely,
+        # so the attempt is abandoned before anything is sent on-chain.
+        trade_data.sell_pending = True
+        trade_data.sell_pending_since = datetime.utcnow()
+        try:
+            db.session.commit()
+        except Exception as e:
+            logger.error(f"Could not persist sell-pending marker for {trade_ref}, not sending: {e}")
+            db.session.rollback()
+            timer.reason = "sell_pending_marker_failed"
+            return "failed"
+
         try:
             with timer.stage("send"):
                 rpc_response = solana_client.send_transaction(signed_transaction, opts=SELL_TX_OPTS)
         except Exception as e:
             logger.error(f"Error sending transaction for {trade_ref}: {str(e)}")
+            # Nothing was sent - safe to clear immediately rather than wait
+            # for reconciliation.
+            trade_data.sell_pending = False
+            trade_data.sell_pending_since = None
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
             timer.reason = "send_rejected"
             return "failed"
         signature = str(rpc_response.value)
@@ -514,6 +549,8 @@ def _sell_if_due(
                 trade_data.purchased_token_amount -= sold_tokens
             if trade_data.purchased_token_amount <= 0:
                 trade_data.executed = True
+            trade_data.sell_pending = False
+            trade_data.sell_pending_since = None
             # One commit for both rows: a DB failure here previously could
             # leave the TradeHistory "sent" row persisted (the first of two
             # commits already went through) while trade_data's own bookkeeping
@@ -521,8 +558,23 @@ def _sell_if_due(
             # stale, un-sold-looking trade_data and could fire the same tier
             # again. Committed together, either both persist or neither does.
             db.session.commit()
+            if trade_data.executed and getattr(trade_data, "auto_snipe", False):
+                # Only after the commit above actually succeeds (action-plan
+                # 1.3) - frees the mint for a future rebuy; see
+                # mark_autosnipe_position_closed's own docstring. Clearing
+                # this before a commit that then fails would let a retry
+                # attempt a rebuy the DB would still correctly reject anyway
+                # (executed is still False there), just a wasted round trip,
+                # but after a commit that succeeds there's nothing to wait for.
+                mark_autosnipe_position_closed(trade_data.user_id, trade_data.token_address)
         except Exception as e:
-            # The sale was sent; retrying soon on the stale row could sell twice.
+            # The sale was sent; retrying soon on the stale row could sell
+            # twice. Nothing to undo here - trade_data.sell_pending (set
+            # True in its own commit before the send above) is still True
+            # on the DB after this rollback, which is exactly what keeps
+            # _sell_if_due from re-evaluating this trade until
+            # reconcile_stuck_sell_pending resolves it against the wallet's
+            # real balance.
             logger.error(f"Sale sent for {trade_ref} (tx {signature}) but DB update failed: {e}")
             db.session.rollback()
             timer.reason = "db_update_failed_after_send"
@@ -713,6 +765,29 @@ def check_inactivity(app) -> None:
         due: list[tuple[str, float]] = []
         with _last_activity_guard:
             for mint, settings in _open_trades_inactivity_settings(app).items():
+                # Action-plan 1.6: an overall-connected stream can still have
+                # no live subscription for this ONE mint - a buy not yet
+                # synced in (SellStream re-syncs every sync_interval, not
+                # instantly), or a subscribe request that silently failed
+                # (see sell_stream.py's "subscribe failed for %s" log).
+                # Silence here means "we can't hear this mint", not "it
+                # stopped trading" - exactly the false positive the
+                # stream-connected check above already guards against, just
+                # scoped to one mint instead of the whole stream. Doesn't
+                # catch a server-side silent drop that never tells the
+                # client (self.subscribed would still show it as
+                # subscribed) - no fully independent signal is cheap enough
+                # to check every sweep tick for that; this closes the
+                # concrete, observable gap instead.
+                if mint not in _sell_stream.subscribed:
+                    was_tracked = mint in _last_activity
+                    _last_activity[mint] = now
+                    if was_tracked:
+                        logger.warning(
+                            f"[Inactivity] {mint} has no live subscription right now; "
+                            f"activity timer reset instead of risking a false inactivity sell."
+                        )
+                    continue
                 last = _last_activity.get(mint)
                 if last is None:
                     _last_activity[mint] = now  # first time seen: its grace period starts now
@@ -856,6 +931,85 @@ def reconcile_pending_sells(app) -> None:
                     db.session.commit()
 
 
+def reconcile_stuck_sell_pending(app) -> None:
+    """
+    Resolves trades left with sell_pending=True (action-plan 1.4b): the send
+    succeeded but the commit that would have recorded a TradeHistory row and
+    updated trade_data's bookkeeping failed, so there's no sold_tokens figure
+    anywhere to replay - only the fact that *something* was sent. Re-reads
+    the wallet's real token balance (ground truth) instead, and syncs
+    purchased_token_amount to match it, rather than guessing at an amount.
+
+    Runs on the same interval as reconcile_pending_sells; waits one interval
+    before touching a trade so the normal send/commit has time to finish (or
+    fail) on its own first.
+    """
+    with app.app_context():
+        try:
+            stuck = Trade.query.filter_by(sell_pending=True).all()
+        except Exception as e:
+            logger.warning(f"[Reconcile] could not load sell-pending trades: {e}")
+            return
+        if not stuck:
+            return
+
+        for trade in stuck:
+            age_sec = (
+                (datetime.utcnow() - trade.sell_pending_since).total_seconds()
+                if trade.sell_pending_since else SNIPER_SELL_RECONCILE_TIMEOUT_SEC
+            )
+            if age_sec < SNIPER_SELL_RECONCILE_INTERVAL_SEC:
+                continue
+
+            lock = _trade_lock(trade.id)
+            if not lock.acquire(blocking=False):
+                continue  # a live sell attempt is already running for this trade
+            try:
+                try:
+                    db.session.refresh(trade)
+                except Exception as e:
+                    logger.warning(f"[Reconcile] could not refresh pending trade {trade.id}: {e}")
+                    continue
+                if not trade.sell_pending:
+                    continue  # resolved by a normal commit between the query above and now
+
+                wallet = Wallet.query.filter_by(public_key=trade.to_pubkey).first()
+                if not wallet:
+                    logger.warning(
+                        f"[Reconcile] wallet missing for sell-pending trade {trade.id}; leaving pending."
+                    )
+                    continue
+                try:
+                    raw_balance, decimals = get_wallet_token_balance(
+                        Pubkey.from_string(wallet.public_key), trade.token_address
+                    )
+                    real_balance = raw_balance / (10 ** decimals) if decimals is not None else 0.0
+                except Exception as e:
+                    logger.warning(f"[Reconcile] could not read wallet balance for trade {trade.id}: {e}")
+                    continue
+
+                before = trade.purchased_token_amount or 0.0
+                trade.purchased_token_amount = real_balance
+                trade.executed = real_balance <= 0
+                trade.sell_pending = False
+                trade.sell_pending_since = None
+                try:
+                    db.session.commit()
+                except Exception as e:
+                    logger.error(f"[Reconcile] failed to resolve sell-pending trade {trade.id}: {e}")
+                    db.session.rollback()
+                    continue
+                if trade.executed and getattr(trade, "auto_snipe", False):
+                    mark_autosnipe_position_closed(trade.user_id, trade.token_address)
+                _retry_after.pop(trade.id, None)
+                logger.info(
+                    f"[Reconcile] sell-pending trade {trade.id} ({trade.token_address}) resolved against "
+                    f"real wallet balance: {before} -> {real_balance} tokens."
+                )
+            finally:
+                lock.release()
+
+
 def auto_snipe_auto_sell_schedular(app):
     global _sell_stream
     # Auto-snipe logic to sell tokens based on configurable conditions
@@ -943,6 +1097,9 @@ def auto_snipe_auto_sell_schedular(app):
     scheduler.add_job(auto_snipe_sell, 'interval', seconds=SNIPER_SELL_CYCLE_INTERVAL_SEC)
     scheduler.add_job(
         lambda: reconcile_pending_sells(app), 'interval', seconds=SNIPER_SELL_RECONCILE_INTERVAL_SEC
+    )
+    scheduler.add_job(
+        lambda: reconcile_stuck_sell_pending(app), 'interval', seconds=SNIPER_SELL_RECONCILE_INTERVAL_SEC
     )
     if SNIPER_SELL_INACTIVITY_ENABLED:
         scheduler.add_job(

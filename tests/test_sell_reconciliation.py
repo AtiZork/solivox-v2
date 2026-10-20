@@ -298,5 +298,164 @@ def test_scheduler_wires_reconcile_job_without_disturbing_sell_cycle_job():
          patch.object(sell_script, "atexit", MagicMock()):
         sell_script.auto_snipe_auto_sell_schedular(Flask("test"))
 
-    assert len(jobs) == 3  # cycle, reconcile, inactivity sweep
+    assert len(jobs) == 4  # cycle, reconcile, sell-pending reconcile (1.4b), inactivity sweep
     assert jobs[0].__name__ == "auto_snipe_sell"
+
+
+# --- reconcile_stuck_sell_pending (action-plan 1.4b) ------------------------
+#
+# Covers the deeper gap the atomic single commit above doesn't close: that
+# commit can still fail as a whole, after a real send succeeded, leaving no
+# TradeHistory row and a stale trade_data - nothing to reconcile against via
+# a signature. This resolves it directly against the wallet's real balance
+# instead, using the sell_pending/sell_pending_since marker written before
+# the send (see _sell_if_due).
+
+
+def _pending_trade(**kwargs):
+    base = dict(
+        id=1, token_address="MintX", to_pubkey="WalletPubkey", purchased_token_amount=1000.0,
+        executed=False, sell_pending=True, sell_pending_since=datetime.utcnow() - timedelta(seconds=30),
+    )
+    base.update(kwargs)
+    return SimpleNamespace(**base)
+
+
+@pytest.fixture
+def pending_harness():
+    h = SimpleNamespace(stuck=[], balances={}, wallets={})
+
+    trade_model = MagicMock()
+    trade_model.query.filter_by.side_effect = lambda **kw: SimpleNamespace(
+        all=lambda: [t for t in h.stuck if all(getattr(t, k, None) == v for k, v in kw.items())]
+    )
+
+    wallet_model = MagicMock()
+    wallet_model.query.filter_by.side_effect = lambda **kw: SimpleNamespace(
+        first=lambda: h.wallets.get(kw.get("public_key"))
+    )
+
+    def _balance(owner, mint):
+        result = h.balances.get(mint, (0, 6))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    h.db = MagicMock()
+    h.app = Flask("test")
+    h.logger = MagicMock()
+    sell_script._retry_after.clear()
+    with patch.object(sell_script, "Trade", trade_model), \
+         patch.object(sell_script, "Wallet", wallet_model), \
+         patch.object(sell_script, "db", h.db), \
+         patch.object(sell_script, "get_wallet_token_balance", side_effect=_balance), \
+         patch.object(sell_script, "Pubkey", SimpleNamespace(from_string=lambda s: s)), \
+         patch.object(sell_script, "logger", h.logger), \
+         patch.object(sell_script, "SNIPER_SELL_RECONCILE_INTERVAL_SEC", 10.0):
+        yield h
+
+
+def test_no_stuck_trades_is_a_noop(pending_harness):
+    sell_script.reconcile_stuck_sell_pending(pending_harness.app)
+    pending_harness.db.session.commit.assert_not_called()
+
+
+def test_resolves_against_real_wallet_balance_and_clears_the_marker(pending_harness):
+    """The send actually landed (balance dropped from 1000 to 400) but the
+    bookkeeping commit never applied it - resync to the real balance rather
+    than guessing at the lost sold_tokens figure."""
+    trade = _pending_trade(purchased_token_amount=1000.0)
+    pending_harness.stuck = [trade]
+    pending_harness.wallets = {"WalletPubkey": SimpleNamespace(public_key="WalletPubkey")}
+    pending_harness.balances = {"MintX": (400_000_000, 6)}
+
+    sell_script.reconcile_stuck_sell_pending(pending_harness.app)
+
+    assert trade.purchased_token_amount == pytest.approx(400.0)
+    assert trade.executed is False
+    assert trade.sell_pending is False
+    assert trade.sell_pending_since is None
+
+
+def test_send_never_landed_resyncs_to_unchanged_balance_and_clears_marker(pending_harness):
+    """The earlier send never actually reduced the wallet (dropped/never
+    landed) - the resync is a no-op on the amount, but the marker still
+    clears so the trade is free to be evaluated normally again."""
+    trade = _pending_trade(purchased_token_amount=1000.0)
+    pending_harness.stuck = [trade]
+    pending_harness.wallets = {"WalletPubkey": SimpleNamespace(public_key="WalletPubkey")}
+    pending_harness.balances = {"MintX": (1000_000_000, 6)}
+
+    sell_script.reconcile_stuck_sell_pending(pending_harness.app)
+
+    assert trade.purchased_token_amount == pytest.approx(1000.0)
+    assert trade.sell_pending is False
+
+
+def test_balance_fully_drained_marks_executed(pending_harness):
+    trade = _pending_trade(purchased_token_amount=1000.0)
+    pending_harness.stuck = [trade]
+    pending_harness.wallets = {"WalletPubkey": SimpleNamespace(public_key="WalletPubkey")}
+    pending_harness.balances = {"MintX": (0, 6)}
+
+    sell_script.reconcile_stuck_sell_pending(pending_harness.app)
+
+    assert trade.purchased_token_amount == 0.0
+    assert trade.executed is True
+    assert trade.sell_pending is False
+
+
+def test_too_recent_to_reconcile_is_left_alone(pending_harness):
+    """Give the normal send/commit a moment to finish before stepping in -
+    otherwise this could race a sell still legitimately in flight."""
+    trade = _pending_trade(sell_pending_since=datetime.utcnow())
+    pending_harness.stuck = [trade]
+
+    sell_script.reconcile_stuck_sell_pending(pending_harness.app)
+
+    assert trade.sell_pending is True
+    pending_harness.db.session.commit.assert_not_called()
+
+
+def test_missing_wallet_leaves_trade_pending_for_next_run(pending_harness):
+    trade = _pending_trade()
+    pending_harness.stuck = [trade]
+    pending_harness.wallets = {}  # wallet not found
+
+    sell_script.reconcile_stuck_sell_pending(pending_harness.app)
+
+    assert trade.sell_pending is True
+    pending_harness.db.session.commit.assert_not_called()
+
+
+def test_balance_read_failure_leaves_trade_pending_for_next_run(pending_harness):
+    trade = _pending_trade()
+    pending_harness.stuck = [trade]
+    pending_harness.wallets = {"WalletPubkey": SimpleNamespace(public_key="WalletPubkey")}
+    pending_harness.balances = {"MintX": RuntimeError("rpc down")}
+
+    sell_script.reconcile_stuck_sell_pending(pending_harness.app)
+
+    assert trade.sell_pending is True
+    pending_harness.db.session.commit.assert_not_called()
+
+
+def test_commit_failure_during_resolve_is_logged_and_left_for_next_run(pending_harness):
+    """
+    A failed commit here means the real DB rolls back the attempted clear,
+    leaving sell_pending durably True for the next pass to retry - this
+    mocked harness can't model that rollback on a plain SimpleNamespace (see
+    the C12 cross-thread-session test for the same caveat), so it only
+    proves the failure is caught, logged, and rolled back rather than
+    raising out of the sweep and skipping every other stuck trade.
+    """
+    trade = _pending_trade()
+    pending_harness.stuck = [trade]
+    pending_harness.wallets = {"WalletPubkey": SimpleNamespace(public_key="WalletPubkey")}
+    pending_harness.balances = {"MintX": (0, 6)}
+    pending_harness.db.session.commit.side_effect = RuntimeError("db down")
+
+    sell_script.reconcile_stuck_sell_pending(pending_harness.app)  # must not raise
+
+    pending_harness.db.session.rollback.assert_called_once()
+    assert "failed to resolve sell-pending trade" in str(pending_harness.logger.error.call_args)

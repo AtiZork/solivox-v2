@@ -278,6 +278,31 @@ class Trade(db.Model):
     inactivity_sell_enabled = db.Column(db.Boolean, nullable=False, default=True)
     inactivity_sell_seconds = db.Column(db.Float, nullable=False, default=5.0)
 
+    # Durable "a sell send was attempted but the DB write recording it failed"
+    # marker (action-plan 1.4b). Set True right before send_transaction, in
+    # its own small commit, and cleared again on whichever commit records the
+    # outcome (success, or the send itself being rejected). It stays True
+    # only when a send actually succeeded but the bigger TradeHistory/
+    # bookkeeping commit right after it failed - exactly the window where a
+    # blind retry would risk sending a second real transaction for tokens
+    # already sold. A periodic reconcile pass (not the sell-decision cycle)
+    # resolves it against the wallet's real on-chain balance.
+    sell_pending = db.Column(db.Boolean, nullable=False, default=False)
+    sell_pending_since = db.Column(db.DateTime, nullable=True)
+
+    # Backs the B10 buy-dedup check (autosnipe_buy_new_token.py) with a real
+    # DB constraint (action-plan 1.3) instead of relying only on a query
+    # check + WALLET_BUY_LOCK serialization. Scoped to open positions
+    # (executed=False), not "ever" - closed out of a mint, the bot is
+    # allowed to buy it again later. partial/PostgreSQL-only: fine here,
+    # the app already requires Postgres (see config.py).
+    __table_args__ = (
+        db.Index(
+            "ix_trade_open_autosnipe_user_mint", "user_id", "token_address",
+            unique=True,
+            postgresql_where=db.and_(auto_snipe == True, executed == False),  # noqa: E712
+        ),
+    )
 
     def __repr__(self):
         return f"<Trade {self.id} - {self.to_pubkey}>"

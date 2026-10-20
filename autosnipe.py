@@ -1,21 +1,9 @@
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from autosnipe_logic import (
-    set_listener_running_status,
-    set_processor_running_status,
-    solana_logs_listener,
-    auto_buy_processor,
-)
 from models import db, AutoSnipeConfig, User, TradeLog, Wallet
-import threading
-import asyncio
 import logging
-from flask import request, jsonify, Blueprint, current_app
+from flask import request, jsonify, Blueprint
 from datetime import datetime
 import sqlalchemy
-
-# --- Initialize global thread variables here ---
-listener_thread = None
-auto_buy_thread = None
 
 autosnipe_bp = Blueprint('autosnipe_bp', __name__)
 
@@ -531,17 +519,16 @@ def toggle_autosnipe_active(config_id):
 
 @autosnipe_bp.route('/start_all', methods=['POST'])
 def start_all_bots():
-    """Retired: legacy buy path, kept here disabled rather than deleted.
-
-    This started a second, unauthenticated buy bot (autosnipe_logic.auto_buy_processor)
-    that picks an arbitrary user's wallet/config via Wallet.query.first() /
-    AutoSnipeConfig.query.first() instead of the caller's own, and creates Trade
-    rows without user_id (a NOT NULL column) - so its DB write throws after a
-    real on-chain buy has already been sent, leaving an unrecorded, unsellable
-    position. The real sniper (autosnipe_buy_new_token.start_sniper_ingestion,
-    started from main.py) already covers token sniping independently of this
-    route. Route disabled rather than wired up with auth, since the thing it
-    would then authorize is itself unsafe to run.
+    """Retired: used to start a second, unauthenticated buy bot
+    (autosnipe_logic.auto_buy_processor) that picked an arbitrary user's
+    wallet/config via Wallet.query.first() / AutoSnipeConfig.query.first()
+    instead of the caller's own, and created Trade rows without user_id (a
+    NOT NULL column) - so its DB write threw after a real on-chain buy had
+    already been sent, leaving an unrecorded, unsellable position. The real
+    sniper (autosnipe_buy_new_token.start_sniper_ingestion, started from
+    main.py) already covers token sniping independently of this route.
+    autosnipe_logic.py (the module this used to call into) has been deleted
+    along with the thread-management code that lived here.
     """
     return jsonify({
         "status": "error",
@@ -550,38 +537,6 @@ def start_all_bots():
     }), 410
 
 
-def _start_all_bots_disabled():
-    """Starts both the Solana listener and the auto-buy processor."""
-    global listener_thread, auto_buy_thread
-
-    # 1. Starting the Solana Listener Thread
-    if not listener_thread or not listener_thread.is_alive():
-        set_listener_running_status(True)
-        app_instance = current_app._get_current_object()  # get actual app instance
-
-        listener_thread = threading.Thread(target=_run_async_listener_with_context, args=(app_instance,), daemon=True)
-        listener_thread.start()
-        logger.info("Solana listener thread initiated.")
-    else:
-        logger.info("Solana listener is already running.")
-
-    # 2. Starting the Auto-Buy Processor Thread
-    if not auto_buy_thread or not auto_buy_thread.is_alive():
-        # Create a new Thread object for the auto-buy processor
-        # `target=_run_auto_buy_processor` specifies the function to run.
-        # `args=(app,)` passes the Flask `app` instance to the target function.
-        # This is CRUCIAL because `auto_buy_processor` needs the `app` context to interact with the database (`db`).
-        # auto_buy_thread = threading.Thread(target=_run_auto_buy_processor, args=(app,), daemon=True)
-        auto_buy_thread = threading.Thread(target=_run_auto_buy_processor, args=(current_app._get_current_object(),), daemon=True)
-
-        auto_buy_thread.start() # Start the thread, which calls `_run_auto_buy_processor`
-        logger.info("Auto-buy processor thread initiated.")
-        return jsonify({"status": "success", "message": "Sniper bot for autobuy token started successfully"}), 200
-
-    else:
-        logger.info("Auto-buy processor is already running.")
-        return jsonify({"status": "success", "message": "Auto-buy processor is already running"}), 200
-
 @autosnipe_bp.route('/stop_all', methods=['POST'])
 def stop_all_bots():
     """Retired along with /start_all - see start_all_bots() docstring."""
@@ -589,62 +544,3 @@ def stop_all_bots():
         "status": "error",
         "message": "This endpoint has been retired. Use the AutoSnipe config's Active toggle instead.",
     }), 410
-
-
-def _stop_all_bots_disabled():
-    """Stops both the Solana listener and the auto-buy processor."""
-    global listener_thread, auto_buy_thread
-    logger.info("Stopping all bots...")
-
-    # Signal the listener thread to stop
-    # This changes the `listener_running` flag to False, causing the `while` loop
-    # in `solana_logs_listener` to eventually terminate.
-    set_listener_running_status(False)
-    logger.info("Stop signal sent to listener.")
-
-    # Signal the processor thread to stop
-    # This changes the `processor_running` flag to False, causing the `while` loop
-    # in `auto_buy_processor` to eventually terminate.
-    set_processor_running_status(False)
-    logger.info("Stop signal sen to processor.")
-
-    return jsonify({"status": "success", "message": "Sniper bot stop"}), 200
-
-# --- Helper functions to run async listener and auto-buyer in threads ---
-
-def _run_async_listener():
-    """Helper to run the async listener in a separate event loop."""
-    # Each thread needs its own asyncio event loop for async operations.
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        # Run the async listener function until it completes (when `listener_running` becomes False)
-        loop.run_until_complete(solana_logs_listener())
-    except asyncio.CancelledError:
-        logger.info("Listener's asyncio loop was cancelled.")
-    finally:
-        loop.close() # Close the event loop when done
-        logger.info("Listener's asyncio loop closed.")
-
-
-def _run_auto_buy_processor(app_instance):
-    """Helper to run the auto-buy processor within the Flask app context."""
-    # The `auto_buy_processor` function needs to interact with the SQLAlchemy database.
-    # SQLAlchemy requires an "application context" to know which Flask app and database
-    # session it's associated with. We create this context for the thread.
-    with app_instance.app_context():
-        # Call the auto-buy processor function. It contains its own `while` loop
-        # that continues as long as `processor_running` is True or `detected_tokens_queue` has items.
-        auto_buy_processor()
-
-def _run_async_listener_with_context(app_instance):
-    with app_instance.app_context():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(solana_logs_listener())
-        except asyncio.CancelledError:
-            logger.info("Listener's asyncio loop was cancelled.")
-        finally:
-            loop.close()
-            logger.info("Listener's asyncio loop closed.")
