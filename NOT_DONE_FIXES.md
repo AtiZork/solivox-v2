@@ -485,6 +485,28 @@ the two thresholds with no decision having fired at all. That's a different mech
   default, and never fires for a trade with no `created_at` (backward compatibility for any caller
   that doesn't pass one). 386/386 passing (net zero test-count change - 7 removed, 7 added).
 
+### Bug: setting Buy Priority Fee (or any sniper numeric field) to 0 silently reverts to the default — ✅ FIXED
+User report: set Buy Priority Fee to 0 in the AutoSniper modal, saved, it stayed at 0.01. Root cause
+was entirely client-side in `static/js/js/autosnipe_manager.js`'s `onModalSave`: every numeric field
+in the save payload used `parseFloat(field.value) || default` - in JS, `0` is falsy, so
+`0 || 0.01` evaluates to `0.01` before the request is even sent. The backend (`autosnipe.py`) was
+never at fault - both its create and update paths already check `if f in data:` (presence), not
+truthiness, so 0 would have saved correctly if it had ever actually been sent.
+
+This wasn't unique to `priority_fee` - the identical `|| default` pattern was on every numeric
+field in that same payload object, including several where 0 is an explicitly valid, documented
+value on the backend (every `sell_at_X` take-profit tier - 0 means "sell nothing at this tier",
+per the comment in `autosnipe_sell_logic.py` - plus `drop_cutoff`, `drop_until_profit`,
+`drop_after_100`, `drop_after_400`, `inactivity_sell_seconds`, and the `critical_failsafe_seconds`
+field from the work above). Fixed all of them in one pass: added `numFieldValue(id, fallback)` /
+`intFieldValue(id, fallback)` helpers that only fall back when the parsed value is `NaN` (field
+truly empty/unparseable), not when it's a legitimate 0, and replaced every `parseFloat(...) ||
+default` / `parseInt(...) || default` line in the payload with a call to one of them. Checked
+`Trading.js` (the other edit surface, for an already-open trade) for the same pattern - it has
+none; its numeric fields are sent as plain `parseFloat(...)` with no fallback, so it was never
+affected. `node --check` passed; manually verified the new helpers with `node -e` (`0` -> `0`,
+empty/`undefined` -> fallback).
+
 ======================================================================
 ## PROPOSED WORKING ORDER (today)
 ======================================================================

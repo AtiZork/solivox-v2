@@ -300,6 +300,20 @@ function clearModal() {
   if (delBtn) delBtn.style.display = 'none';
 }
 
+// parseFloat/parseInt's result is only replaced by `fallback` when the field
+// is empty/unparseable (NaN) - unlike the old "parsed || fallback" pattern,
+// an intentional 0 (a valid, meaningful value for priority fees, drop
+// thresholds, and every sell_at_X tier - see autosnipe_sell_logic.py) is no
+// longer silently overwritten by the default on save.
+function numFieldValue(id, fallback) {
+  const v = parseFloat(document.getElementById(id)?.value);
+  return Number.isNaN(v) ? fallback : v;
+}
+function intFieldValue(id, fallback) {
+  const v = parseInt(document.getElementById(id)?.value, 10);
+  return Number.isNaN(v) ? fallback : v;
+}
+
 async function onModalSave(e) {
   e.preventDefault();
   const idField = document.getElementById('modal_autosniper_id');
@@ -307,37 +321,37 @@ async function onModalSave(e) {
   const walletIdRaw = document.getElementById('modal_wallet_id')?.value;
   const payload = {
     wallet_id: walletIdRaw ? parseInt(walletIdRaw) : null,
-    buy_txns_over_80_usd: parseFloat(document.getElementById('modal_buy_txns_over_80_usd')?.value) || 80,
-    min_txns: parseInt(document.getElementById('modal_min_txns')?.value) || 5,
-    launch_delay: parseInt(document.getElementById('modal_launch_delay')?.value) || 5,
+    buy_txns_over_80_usd: numFieldValue('modal_buy_txns_over_80_usd', 80),
+    min_txns: intFieldValue('modal_min_txns', 5),
+    launch_delay: intFieldValue('modal_launch_delay', 5),
     half_txns_scan_enabled: !!document.getElementById('modal_half_txns_scan_enabled')?.checked,
-    half_txns_scan_duration: parseInt(document.getElementById('modal_half_txns_scan_duration')?.value) || 30,
-    buy_amount: parseFloat(document.getElementById('modal_buy_amount')?.value) || 1,
-    slippage: parseFloat(document.getElementById('modal_slippage')?.value) || 20,
-    priority_fee: parseFloat(document.getElementById('modal_priority_fee')?.value) || 0.01,
-    sell_priority_fee: parseFloat(document.getElementById('modal_sell_priority_fee')?.value) || 0.01,
-    drop_cutoff: parseFloat(document.getElementById('modal_drop_cutoff')?.value) || 30,
+    half_txns_scan_duration: intFieldValue('modal_half_txns_scan_duration', 30),
+    buy_amount: numFieldValue('modal_buy_amount', 1),
+    slippage: numFieldValue('modal_slippage', 20),
+    priority_fee: numFieldValue('modal_priority_fee', 0.01),
+    sell_priority_fee: numFieldValue('modal_sell_priority_fee', 0.01),
+    drop_cutoff: numFieldValue('modal_drop_cutoff', 30),
     drop_cutoff_enabled: !!document.getElementById('modal_drop_cutoff_enabled')?.checked,
-    drop_until_profit: parseFloat(document.getElementById('modal_drop_until_profit')?.value) || 99,
-    drop_after_100: parseFloat(document.getElementById('modal_drop_after_100')?.value) || 50,
+    drop_until_profit: numFieldValue('modal_drop_until_profit', 99),
+    drop_after_100: numFieldValue('modal_drop_after_100', 50),
     drop_after_100_enabled: !!document.getElementById('modal_drop_after_100_enabled')?.checked,
-    drop_after_400: parseFloat(document.getElementById('modal_drop_after_400')?.value) || 30,
+    drop_after_400: numFieldValue('modal_drop_after_400', 30),
     drop_after_400_enabled: !!document.getElementById('modal_drop_after_400_enabled')?.checked,
-    inactivity_sell_seconds: parseFloat(document.getElementById('modal_inactivity_sell_seconds')?.value) || 5,
+    inactivity_sell_seconds: numFieldValue('modal_inactivity_sell_seconds', 5),
     inactivity_sell_enabled: !!document.getElementById('modal_inactivity_sell_enabled')?.checked,
-    critical_failsafe_seconds: parseFloat(document.getElementById('modal_critical_failsafe_seconds')?.value) || 5,
+    critical_failsafe_seconds: numFieldValue('modal_critical_failsafe_seconds', 5),
     critical_failsafe_enabled: !!document.getElementById('modal_critical_failsafe_enabled')?.checked,
-    sell_at_100: parseFloat(document.getElementById('modal_sell_at_100')?.value) || 10,
-    sell_at_200: parseFloat(document.getElementById('modal_sell_at_200')?.value) || 10,
-    sell_at_300: parseFloat(document.getElementById('modal_sell_at_300')?.value) || 10,
-    sell_at_400: parseFloat(document.getElementById('modal_sell_at_400')?.value) || 10,
-    sell_at_600: parseFloat(document.getElementById('modal_sell_at_600')?.value) || 10,
-    sell_at_800: parseFloat(document.getElementById('modal_sell_at_800')?.value) || 10,
-    sell_at_1000: parseFloat(document.getElementById('modal_sell_at_1000')?.value) || 10,
-    sell_at_1500: parseFloat(document.getElementById('modal_sell_at_1500')?.value) || 10,
-    sell_at_2500: parseFloat(document.getElementById('modal_sell_at_2500')?.value) || 10,
-    sell_at_4000: parseFloat(document.getElementById('modal_sell_at_4000')?.value) || 10,
-    sell_at_10000: parseFloat(document.getElementById('modal_sell_at_10000')?.value) || 10,
+    sell_at_100: numFieldValue('modal_sell_at_100', 10),
+    sell_at_200: numFieldValue('modal_sell_at_200', 10),
+    sell_at_300: numFieldValue('modal_sell_at_300', 10),
+    sell_at_400: numFieldValue('modal_sell_at_400', 10),
+    sell_at_600: numFieldValue('modal_sell_at_600', 10),
+    sell_at_800: numFieldValue('modal_sell_at_800', 10),
+    sell_at_1000: numFieldValue('modal_sell_at_1000', 10),
+    sell_at_1500: numFieldValue('modal_sell_at_1500', 10),
+    sell_at_2500: numFieldValue('modal_sell_at_2500', 10),
+    sell_at_4000: numFieldValue('modal_sell_at_4000', 10),
+    sell_at_10000: numFieldValue('modal_sell_at_10000', 10),
     active: !!document.getElementById('modal_active')?.checked,
   };
   try {
