@@ -171,6 +171,14 @@
                       <label class="form-check-label" for="modal_inactivity_sell_enabled">Enabled</label>
                     </div>
                   </div>
+                  <div class="col-md-6 mb-3">
+                    <label class="form-label">Sell - fail-safe if a decision hasn't sold within (sec)</label>
+                    <input type="number" min="1" id="modal_critical_failsafe_seconds" class="form-control" value="5" />
+                    <div class="form-check form-switch mt-1">
+                      <input class="form-check-input" type="checkbox" id="modal_critical_failsafe_enabled" checked>
+                      <label class="form-check-label" for="modal_critical_failsafe_enabled">Enabled</label>
+                    </div>
+                  </div>
 
                   <!-- Profit target sell percentages -->
                   <div class="col-md-4 mb-3">

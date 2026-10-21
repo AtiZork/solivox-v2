@@ -122,6 +122,8 @@ document.getElementById("editTransactionForm").addEventListener("submit", async 
             autosnipe_sell_slippage: parseFloat(document.getElementById("updateAutosnipeSellSlippage").value),
             inactivity_sell_seconds: parseFloat(document.getElementById("updateInactivitySellSeconds").value),
             inactivity_sell_enabled: !!document.getElementById("updateInactivitySellEnabled")?.checked,
+            critical_failsafe_seconds: parseFloat(document.getElementById("updateCriticalFailsafeSeconds").value),
+            critical_failsafe_enabled: !!document.getElementById("updateCriticalFailsafeEnabled")?.checked,
         };
     } else {
         requestData = {
@@ -307,6 +309,8 @@ function openEditModal(value) {
         document.getElementById("updateAutosnipeSellSlippage").value = transaction.autosnipe_sell_slippage ?? 30;
         document.getElementById("updateInactivitySellSeconds").value = transaction.inactivity_sell_seconds ?? 5;
         document.getElementById("updateInactivitySellEnabled").checked = transaction.inactivity_sell_enabled !== false;
+        document.getElementById("updateCriticalFailsafeSeconds").value = transaction.critical_failsafe_seconds ?? 5;
+        document.getElementById("updateCriticalFailsafeEnabled").checked = transaction.critical_failsafe_enabled !== false;
     } else {
         const isPending = isPendingTrade(transaction);
         if (isPending) {

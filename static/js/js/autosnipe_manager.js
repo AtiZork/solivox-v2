@@ -63,6 +63,7 @@ function createCardElement(sniper) {
         <p class="mb-1">Sell drop cutoff: <strong>${sniper.drop_cutoff}</strong>% • Until profit: <strong>${sniper.drop_until_profit}</strong>%</p>
         <p class="mb-1">Sell targets: 100%:<strong>${sniper.sell_at_100 ?? 10}</strong>% 200%:<strong>${sniper.sell_at_200}</strong>% 300%:<strong>${sniper.sell_at_300 ?? 10}</strong>% 400%:<strong>${sniper.sell_at_400}</strong>% 600%:<strong>${sniper.sell_at_600 ?? 10}</strong>% 800%:<strong>${sniper.sell_at_800 ?? 10}</strong>% 1000%:<strong>${sniper.sell_at_1000}</strong>%</p>
         <p class="mb-1">Inactivity sell: <strong>${sniper.inactivity_sell_enabled !== false ? 'On' : 'Off'}</strong>${sniper.inactivity_sell_enabled !== false ? ` • ${sniper.inactivity_sell_seconds ?? 5}s` : ''}</p>
+        <p class="mb-1">Decision fail-safe: <strong>${sniper.critical_failsafe_enabled !== false ? 'On' : 'Off'}</strong>${sniper.critical_failsafe_enabled !== false ? ` • ${sniper.critical_failsafe_seconds ?? 5}s` : ''}</p>
         <p class="mb-0">Status: ${sniper.active ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Inactive</span>'}</p>
       </div>
     </div>
@@ -152,6 +153,7 @@ function openModalWithData(sniper) {
   const dropAfter100Field = document.getElementById('modal_drop_after_100');
   const dropAfter400Field = document.getElementById('modal_drop_after_400');
   const inactivitySecondsField = document.getElementById('modal_inactivity_sell_seconds');
+  const criticalFailsafeSecondsField = document.getElementById('modal_critical_failsafe_seconds');
   const sell100 = document.getElementById('modal_sell_at_100');
   const sell200 = document.getElementById('modal_sell_at_200');
   const sell300 = document.getElementById('modal_sell_at_300');
@@ -184,14 +186,17 @@ function openModalWithData(sniper) {
   if (dropAfter100Field) dropAfter100Field.value = sniper.drop_after_100 ?? 50;
   if (dropAfter400Field) dropAfter400Field.value = sniper.drop_after_400 ?? 30;
   if (inactivitySecondsField) inactivitySecondsField.value = sniper.inactivity_sell_seconds ?? 5;
+  if (criticalFailsafeSecondsField) criticalFailsafeSecondsField.value = sniper.critical_failsafe_seconds ?? 5;
   const dropCutoffEnabled = document.getElementById('modal_drop_cutoff_enabled');
   const dropAfter100Enabled = document.getElementById('modal_drop_after_100_enabled');
   const dropAfter400Enabled = document.getElementById('modal_drop_after_400_enabled');
   const inactivityEnabled = document.getElementById('modal_inactivity_sell_enabled');
+  const criticalFailsafeEnabled = document.getElementById('modal_critical_failsafe_enabled');
   if (dropCutoffEnabled) dropCutoffEnabled.checked = sniper.drop_cutoff_enabled !== false;
   if (dropAfter100Enabled) dropAfter100Enabled.checked = sniper.drop_after_100_enabled !== false;
   if (dropAfter400Enabled) dropAfter400Enabled.checked = sniper.drop_after_400_enabled !== false;
   if (inactivityEnabled) inactivityEnabled.checked = sniper.inactivity_sell_enabled !== false;
+  if (criticalFailsafeEnabled) criticalFailsafeEnabled.checked = sniper.critical_failsafe_enabled !== false;
   if (sell100) sell100.value = sniper.sell_at_100 ?? 10;
   if (sell200) sell200.value = sniper.sell_at_200 ?? 10;
   if (sell300) sell300.value = sniper.sell_at_300 ?? 10;
@@ -236,6 +241,7 @@ function clearModal() {
   const dropAfter100Field = document.getElementById('modal_drop_after_100');
   const dropAfter400Field = document.getElementById('modal_drop_after_400');
   const inactivitySecondsField = document.getElementById('modal_inactivity_sell_seconds');
+  const criticalFailsafeSecondsField = document.getElementById('modal_critical_failsafe_seconds');
   const sell100 = document.getElementById('modal_sell_at_100');
   const sell200 = document.getElementById('modal_sell_at_200');
   const sell300 = document.getElementById('modal_sell_at_300');
@@ -267,14 +273,17 @@ function clearModal() {
   if (dropAfter100Field) dropAfter100Field.value = 50;
   if (dropAfter400Field) dropAfter400Field.value = 30;
   if (inactivitySecondsField) inactivitySecondsField.value = 5;
+  if (criticalFailsafeSecondsField) criticalFailsafeSecondsField.value = 5;
   const dropCutoffEnabled = document.getElementById('modal_drop_cutoff_enabled');
   const dropAfter100Enabled = document.getElementById('modal_drop_after_100_enabled');
   const dropAfter400Enabled = document.getElementById('modal_drop_after_400_enabled');
   const inactivityEnabledClear = document.getElementById('modal_inactivity_sell_enabled');
+  const criticalFailsafeEnabledClear = document.getElementById('modal_critical_failsafe_enabled');
   if (dropCutoffEnabled) dropCutoffEnabled.checked = true;
   if (dropAfter100Enabled) dropAfter100Enabled.checked = true;
   if (dropAfter400Enabled) dropAfter400Enabled.checked = true;
   if (inactivityEnabledClear) inactivityEnabledClear.checked = true;
+  if (criticalFailsafeEnabledClear) criticalFailsafeEnabledClear.checked = true;
   if (sell100) sell100.value = 10;
   if (sell200) sell200.value = 10;
   if (sell300) sell300.value = 10;
@@ -316,6 +325,8 @@ async function onModalSave(e) {
     drop_after_400_enabled: !!document.getElementById('modal_drop_after_400_enabled')?.checked,
     inactivity_sell_seconds: parseFloat(document.getElementById('modal_inactivity_sell_seconds')?.value) || 5,
     inactivity_sell_enabled: !!document.getElementById('modal_inactivity_sell_enabled')?.checked,
+    critical_failsafe_seconds: parseFloat(document.getElementById('modal_critical_failsafe_seconds')?.value) || 5,
+    critical_failsafe_enabled: !!document.getElementById('modal_critical_failsafe_enabled')?.checked,
     sell_at_100: parseFloat(document.getElementById('modal_sell_at_100')?.value) || 10,
     sell_at_200: parseFloat(document.getElementById('modal_sell_at_200')?.value) || 10,
     sell_at_300: parseFloat(document.getElementById('modal_sell_at_300')?.value) || 10,

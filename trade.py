@@ -329,6 +329,8 @@ def get_trades():
                 "autosnipe_sell_slippage": trade.autosnipe_sell_slippage,
                 "inactivity_sell_enabled": bool(getattr(trade, "inactivity_sell_enabled", True)),
                 "inactivity_sell_seconds": getattr(trade, "inactivity_sell_seconds", 5),
+                "critical_failsafe_enabled": bool(getattr(trade, "critical_failsafe_enabled", True)),
+                "critical_failsafe_seconds": getattr(trade, "critical_failsafe_seconds", 5),
             })
 
             trade_list.append(base_trade_data)
@@ -398,6 +400,8 @@ def update_trade(trade_id):
             "autosnipe_sell_slippage": "autosnipe_sell_slippage",
             "inactivity_sell_enabled": "inactivity_sell_enabled",
             "inactivity_sell_seconds": "inactivity_sell_seconds",
+            "critical_failsafe_enabled": "critical_failsafe_enabled",
+            "critical_failsafe_seconds": "critical_failsafe_seconds",
         }
 
         # # Apply updates based on mapping

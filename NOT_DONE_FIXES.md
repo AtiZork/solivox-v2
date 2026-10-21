@@ -349,6 +349,103 @@ the same hot paths 1.4a/1.4b just hardened - deserves its own dedicated review p
 bundle-in with a reporting feature.
 
 ======================================================================
+## POST-DEPLOY: live findings and new client requests
+======================================================================
+
+### Live incident: sells (and buys) stalled — wallet out of SOL for fees — ✅ RESOLVED, no code change
+After deploying 1.1-1.7 + Section 3, the client reported sells weren't happening. Diagnosed live
+via `journalctl` + direct DB/RPC checks (not guessed): the active wallet's SOL balance had dropped
+to ~0.049 SOL, below what dozens of open positions each needed for their `default_gas_fee` (0.01
+SOL) priority fee. Confirmed via the exact on-chain rejection in the logs:
+`SendTransactionPreflightFailureMessage ... Insufficient funds for fee`. Not a bug - the sell
+decisions were firing correctly (confirmed via `[Sell decision]` log lines and the
+`scripts/diagnose_stuck_sells.py` tool), they just couldn't afford to execute. Resolved by the
+client topping up the wallet; verified afterward via logs that both a buy and a sell completed
+cleanly post-top-up, with the new `db_pending` stage (from 1.4a) costing exactly 3.9ms as
+predicted - confirming the earlier "no noticeable speed difference" answer with real production
+numbers, not just estimates.
+
+### New client request: 5-second fail-safe on sell decisions — ✅ DONE
+Client feedback (Mansoor, via WhatsApp): once a sell decision fires (their examples: 100% profit,
+30% stop-loss), if it hasn't actually sold within 5 seconds, force it through rather than let it
+sit. Clarified the ambiguous wording with the user before implementing (three readings were
+possible - confirmation debounce, a hard forced-exit-regardless-of-price timer, or a fail-safe on
+top of the existing decision logic); confirmed it's the fail-safe reading.
+
+**Scope decision:** implemented as a fail-safe for *any* fired sell decision (not only the two
+named examples) - the actual problem being solved is "a decision we already made must not keep
+silently waiting behind an unrelated cooldown," which applies equally to inactivity sells,
+trailing-stop-after-peak sells, and every take-profit tier, not just these two. Simpler to reason
+about than classifying which named rule fired, and strictly safer (every exit type gets the same
+reliability guarantee) - flagged here in case the client wants it narrowed back to just the two
+named triggers.
+
+**What it actually fixes:** the existing cooldowns (`SNIPER_SELL_EMPTY_COOLDOWN_SEC`=60s,
+`SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC`=20s) are set for an *earlier, unrelated* failed attempt on a
+trade - e.g. a stale zero-balance read, or a 429. If a genuine sell decision then fires on that
+same trade, it was previously stuck waiting out that leftover cooldown even though the condition
+triggering it has nothing to do with why the cooldown was set. Now: once a decision has been firm
+for `SNIPER_SELL_CRITICAL_FAILSAFE_SEC` (default 5s, new setting in `settings.py`), the next cycle
+tick forces a retry regardless of `_retry_after`.
+
+**Explicit exception:** never overrides an active rate-limit (429) backoff - retrying through that
+would defeat the entire reason `SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC` exists (a documented earlier
+fix: hammering an already-rate-limited endpoint just prevents a backlog from ever draining).
+Tracked via a new `_rate_limited_until` dict, checked independently of the general fail-safe.
+
+`autosnipe_sell_script.py`: new `_decision_pending_since` dict (trade id -> when a decision first
+became firm, cleared once resolved or sold) and `_rate_limited_until` dict, both reset in the same
+places `_retry_after`/`_empty_since` already are. No change to `autosnipe_sell_logic.py` - the
+fail-safe only touches the cooldown gate in `_sell_if_due`, not the decision logic itself.
+
+Added 5 new tests in `tests/test_sell_early_and_cooldown.py`: forces through an active EMPTY
+cooldown once overdue, respects it before the threshold, never overrides an active rate-limit
+cooldown even when overdue, and the tracking dict correctly resets both when a decision resolves
+to nothing and after a successful sell. Also added the two new dicts to the shared test harness's
+per-test cleanup (`test_sniper_take_profit.py`) to avoid cross-test pollution, matching the
+pattern already used for `_retry_after`/`_empty_since`. 384/384 passing (up from 379), clean
+import under the real `so-venv`.
+
+### Correction: fail-safe must be per-config, not a global fixed setting — ✅ DONE
+User correction after the above shipped: must be an enable/disable + adjustable-value field per
+sniper config (like `drop_cutoff`/`inactivity_sell_seconds` already are), not a single
+`settings.py` constant applying to every trade. Rebuilt on the exact existing
+`inactivity_sell_enabled`/`inactivity_sell_seconds` pattern end-to-end, touching every file that
+pattern already touches:
+
+- `models.py`: new `critical_failsafe_enabled`/`critical_failsafe_seconds` columns on both
+  `AutoSnipeConfig` (the template) and `Trade` (the snapshot at buy time), plus added to
+  `AutoSnipeConfig.to_dict()`.
+- `main.py`: `ALTER TABLE` entries for both tables in the existing self-migrating schema-sync
+  step - confirmed live on the production DB after import (no manual migration needed, same as
+  every other column this session added).
+- `autosnipe.py`: added to `_RANGE_FIELDS` (0-3600s), `_SNIPER_ENABLE_FIELDS`, both numeric-field
+  update loops (POST create + PUT update), and all three places `AutoSnipeConfig` fields get
+  serialized back to the client (`list_autosnipers`, `get_autosnipe`, and both of their raw-SQL
+  fallback-read paths for a schema-mismatch).
+- `autosnipe_buy_new_token.py`: copies both fields from the config onto the new `Trade` row at
+  buy time, same as `inactivity_sell_enabled`/`inactivity_sell_seconds`.
+- `autosnipe_sell_script.py`: new `_critical_failsafe_enabled_for`/`_critical_failsafe_threshold_for`
+  helpers (mirroring `_inactivity_enabled_for`/`_inactivity_threshold_for` exactly - per-trade
+  value if set, else fall back to the global `SNIPER_SELL_CRITICAL_FAILSAFE_SEC` default). The
+  fail-safe override in `_sell_if_due` now reads through these instead of the raw global constant;
+  disabled on a given trade, it never fires at all.
+- `trade.py`: added to the per-trade settings returned by `GET /get_trades` and the field-mapping
+  dict `PUT /trade/<id>/` uses to apply updates - this is the *other* existing surface
+  `inactivity_sell_seconds` is already editable from (an already-open trade directly, not just the
+  config template), so kept both in sync for consistency.
+- Frontend: added the matching seconds-input + enabled-checkbox pair to both edit surfaces -
+  `templates/autosnipe.html` + `static/js/js/autosnipe_manager.js` (the sniper config modal) and
+  `templates/base.html` + `static/js/js/Trading.js` (the per-trade edit modal) - populate, save,
+  and clear-on-close all wired the same way the inactivity fields already are.
+
+Added 2 new tests: a per-trade `critical_failsafe_enabled=False` never overrides a cooldown even
+when wildly overdue by the global default, and a custom `critical_failsafe_seconds` (e.g. 20s)
+is respected - doesn't fire at the 5s global default, only once its own longer value elapses.
+386/386 passing, confirmed the new columns exist on the live DB after import, clean import under
+the real `so-venv`.
+
+======================================================================
 ## PROPOSED WORKING ORDER (today)
 ======================================================================
 
@@ -362,5 +459,3 @@ bundle-in with a reporting feature.
 8. 1.8 (CI) — separate, infra-only, last item in Section 1 — still open, needs your platform call
 9. Section 3 (3.1-3.5, new dashboards) — ✅ DONE
 
-Holding 1.2, 2.2, 2.3 until you confirm. Section 2's remainder is explicitly on hold per your
-instruction, not forgotten.

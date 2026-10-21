@@ -690,6 +690,10 @@ def _buy_token_internal(token_address, config, timer=None):
             inactivity_sell_seconds=(
                 config.inactivity_sell_seconds if getattr(config, "inactivity_sell_seconds", None) else 5.0
             ),
+            critical_failsafe_enabled=bool(getattr(config, "critical_failsafe_enabled", True)),
+            critical_failsafe_seconds=(
+                config.critical_failsafe_seconds if getattr(config, "critical_failsafe_seconds", None) else 5.0
+            ),
         )
         with timer.stage("db_pending"):
             db.session.add(new_trade)

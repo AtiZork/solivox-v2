@@ -478,6 +478,8 @@ def harness(tmp_path):
     sell_script.price_tracking.clear()
     sell_script._retry_after.clear()
     sell_script._empty_since.clear()
+    sell_script._decision_pending_since.clear()
+    sell_script._rate_limited_until.clear()
     sell_script._last_activity.clear()
     sell_script._no_price_warned_until.clear()
     sell_script._stream_was_connected = False

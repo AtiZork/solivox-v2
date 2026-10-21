@@ -70,6 +70,7 @@ _RANGE_FIELDS = {
     'sell_at_1000': (0, 100), 'sell_at_1500': (0, 100), 'sell_at_2500': (0, 100),
     'sell_at_4000': (0, 100), 'sell_at_10000': (0, 100),
     'inactivity_sell_seconds': (0, 3600),
+    'critical_failsafe_seconds': (0, 3600),
 }
 # Fields whose lower bound is exclusive (must be strictly greater than, not
 # just "at least") - these are the ones that are meaningless or dangerous at
@@ -161,6 +162,7 @@ _SNIPER_ENABLE_FIELDS = (
     "drop_after_100_enabled",
     "drop_after_400_enabled",
     "inactivity_sell_enabled",
+    "critical_failsafe_enabled",
 )
 
 
@@ -217,7 +219,7 @@ def autosnipe():
         for f in ['drop_cutoff','drop_until_profit','drop_after_100','drop_after_400',
                   'sell_at_100','sell_at_200','sell_at_300','sell_at_400','sell_at_600','sell_at_800',
                   'sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000',
-                  'inactivity_sell_seconds']:
+                  'inactivity_sell_seconds', 'critical_failsafe_seconds']:
             if f in data:
                 try:
                     setattr(config, f, float(data.get(f)))
@@ -298,6 +300,8 @@ def list_autosnipers():
                         'sell_at_10000': row.get('sell_at_10000', 10),
                         'inactivity_sell_enabled': bool(row.get('inactivity_sell_enabled')) if 'inactivity_sell_enabled' in row else True,
                         'inactivity_sell_seconds': row.get('inactivity_sell_seconds', 5),
+                        'critical_failsafe_enabled': bool(row.get('critical_failsafe_enabled')) if 'critical_failsafe_enabled' in row else True,
+                        'critical_failsafe_seconds': row.get('critical_failsafe_seconds', 5),
                         'timestamp': row.get('timestamp').isoformat() if row.get('timestamp') else None,
                     }
                     rows.append(mapped)
@@ -353,6 +357,8 @@ def get_autosnipe():
                 "sell_at_10000": config.sell_at_10000,
                 "inactivity_sell_enabled": bool(getattr(config, "inactivity_sell_enabled", True)),
                 "inactivity_sell_seconds": getattr(config, "inactivity_sell_seconds", 5),
+                "critical_failsafe_enabled": bool(getattr(config, "critical_failsafe_enabled", True)),
+                "critical_failsafe_seconds": getattr(config, "critical_failsafe_seconds", 5),
                 "id": config.id,
             })
         return jsonify({})
@@ -403,6 +409,8 @@ def get_autosnipe():
                     'sell_at_10000': r.get('sell_at_10000', 10),
                     'inactivity_sell_enabled': bool(r.get('inactivity_sell_enabled')) if 'inactivity_sell_enabled' in r else True,
                     'inactivity_sell_seconds': r.get('inactivity_sell_seconds', 5),
+                    'critical_failsafe_enabled': bool(r.get('critical_failsafe_enabled')) if 'critical_failsafe_enabled' in r else True,
+                    'critical_failsafe_seconds': r.get('critical_failsafe_seconds', 5),
                     'id': r.get('id'),
                 }
                 return jsonify(mapped), 200
@@ -456,7 +464,7 @@ def update_autosnipe(config_id):
         for f in ['drop_cutoff','drop_until_profit','drop_after_100','drop_after_400',
                   'sell_at_100','sell_at_200','sell_at_300','sell_at_400','sell_at_600','sell_at_800',
                   'sell_at_1000','sell_at_1500','sell_at_2500','sell_at_4000','sell_at_10000',
-                  'inactivity_sell_seconds']:
+                  'inactivity_sell_seconds', 'critical_failsafe_seconds']:
             if f in data:
                 try:
                     setattr(config, f, float(data.get(f)))

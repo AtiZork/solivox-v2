@@ -122,6 +122,14 @@ class AutoSnipeConfig(db.Model):
     inactivity_sell_enabled = db.Column(db.Boolean, nullable=False, default=True)
     # 5s is an explicit client requirement, not a default to be tuned up.
     inactivity_sell_seconds = db.Column(db.Float, nullable=False, default=5.0)
+    # Fail-safe (client request): once a sell decision has fired (take-profit,
+    # stop-loss, trailing-stop, inactivity - whichever), if it hasn't sold
+    # within this many seconds, force a retry on the next cycle tick instead
+    # of waiting out a cooldown left over from an earlier, unrelated failed
+    # attempt. Per-config and enable/disable like every other sell rule here,
+    # not a fixed global setting - copied onto each Trade at buy time.
+    critical_failsafe_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    critical_failsafe_seconds = db.Column(db.Float, nullable=False, default=5.0)
     active = db.Column(db.Boolean, nullable=False, default=True)  # New field
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -159,6 +167,8 @@ class AutoSnipeConfig(db.Model):
             "sell_at_10000": self.sell_at_10000,
             "inactivity_sell_enabled": bool(getattr(self, "inactivity_sell_enabled", True)),
             "inactivity_sell_seconds": getattr(self, "inactivity_sell_seconds", 5.0),
+            "critical_failsafe_enabled": bool(getattr(self, "critical_failsafe_enabled", True)),
+            "critical_failsafe_seconds": getattr(self, "critical_failsafe_seconds", 5.0),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 
@@ -277,6 +287,10 @@ class Trade(db.Model):
     # time, same as drop_cutoff/drop_cutoff_enabled above.
     inactivity_sell_enabled = db.Column(db.Boolean, nullable=False, default=True)
     inactivity_sell_seconds = db.Column(db.Float, nullable=False, default=5.0)
+    # Captured from AutoSnipeConfig at buy time, same as inactivity_sell_*
+    # above - see AutoSnipeConfig.critical_failsafe_enabled's own comment.
+    critical_failsafe_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    critical_failsafe_seconds = db.Column(db.Float, nullable=False, default=5.0)
 
     # Durable "a sell send was attempted but the DB write recording it failed"
     # marker (action-plan 1.4b). Set True right before send_transaction, in
