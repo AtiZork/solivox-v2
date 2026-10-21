@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import time
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -125,6 +126,76 @@ def test_tier_already_sold_is_not_sold_again():
     trade = _live_config_trade(last_tp_tier=2.0, tp_pct_sold=10, initial_token_amount=1000.0,
                                purchased_token_amount=900.0)
     decision = evaluate_autosnipe_sell(trade, 2.4, {})
+    assert decision.amount == 0
+
+
+# --- Critical fail-safe timer (client request) -----------------------------
+# "once a token is purchased: start timer for 5 sec, after 5 sec if neither
+# of the sell conditions are achieved (take profit at 100% or stop loss)
+# sell it" - a flat/stuck price that's neither hit the stop-loss nor reached
+# 100% profit by the configured number of seconds after purchase gets force-
+# sold at whatever price it's at. Reuses the trade's own drop_cutoff (stop-
+# loss) and the same 100%-profit mark (2x) the rest of the bot already uses -
+# no separate thresholds. Judged at the exact moment the timer elapses, not
+# against a peak.
+
+def test_failsafe_force_sells_a_flat_price_once_the_threshold_elapses():
+    trade = _live_config_trade(critical_failsafe_enabled=True, critical_failsafe_seconds=5,
+                               created_at=datetime.utcnow() - timedelta(seconds=6))
+    decision = evaluate_autosnipe_sell(trade, 1.0, {})  # flat: no profit, no loss
+    assert decision.amount == 1000.0
+    assert decision.message == "Auto-Sell All: 5s elapsed without reaching 100% profit or stop-loss"
+
+
+def test_failsafe_does_not_fire_before_the_threshold_elapses():
+    trade = _live_config_trade(critical_failsafe_enabled=True, critical_failsafe_seconds=5,
+                               created_at=datetime.utcnow() - timedelta(seconds=2))
+    decision = evaluate_autosnipe_sell(trade, 1.0, {})
+    assert decision.amount == 0
+
+
+def test_failsafe_does_not_override_an_already_fired_stop_loss():
+    """drop_cutoff is checked first and returns before the timer check is
+    ever reached, so the stop-loss message/amount wins regardless of the
+    timer - this isn't a race, it's a fixed evaluation order."""
+    trade = _live_config_trade(critical_failsafe_enabled=True, critical_failsafe_seconds=5,
+                               created_at=datetime.utcnow() - timedelta(seconds=6))
+    decision = evaluate_autosnipe_sell(trade, 0.69, {})  # below the 30% stop-loss
+    assert decision.message == "Auto-Sell All: Drops below 30%"
+
+
+def test_failsafe_does_not_fire_once_100_percent_profit_is_reached():
+    """100% profit counts as "achieved" even though this then falls through
+    to the normal take-profit tier logic instead of a forced full exit."""
+    trade = _live_config_trade(critical_failsafe_enabled=True, critical_failsafe_seconds=5,
+                               created_at=datetime.utcnow() - timedelta(seconds=10))
+    decision = evaluate_autosnipe_sell(trade, 2.0, {})  # exactly 100% profit
+    assert decision.message == "Auto-Sell 10% of position at 100% Profit (take-profit total 10%)"
+
+
+def test_failsafe_is_per_config_disabled_and_never_fires():
+    trade = _live_config_trade(critical_failsafe_enabled=False, critical_failsafe_seconds=5,
+                               created_at=datetime.utcnow() - timedelta(seconds=100))
+    decision = evaluate_autosnipe_sell(trade, 1.0, {})
+    assert decision.amount == 0
+
+
+def test_failsafe_uses_the_per_trade_threshold_not_a_fixed_5s():
+    trade = _live_config_trade(critical_failsafe_enabled=True, critical_failsafe_seconds=20,
+                               created_at=datetime.utcnow() - timedelta(seconds=10))
+    decision = evaluate_autosnipe_sell(trade, 1.0, {})
+    assert decision.amount == 0  # 10s in, this trade's own threshold is 20s
+
+    trade.created_at = datetime.utcnow() - timedelta(seconds=25)
+    decision = evaluate_autosnipe_sell(trade, 1.0, {})
+    assert decision.amount == 1000.0
+
+
+def test_failsafe_never_fires_without_a_created_at_timestamp():
+    """Backward compatibility: a trade predating this column (or any caller
+    that doesn't pass one) must never be force-sold by this rule."""
+    trade = _live_config_trade(critical_failsafe_enabled=True, critical_failsafe_seconds=5)
+    decision = evaluate_autosnipe_sell(trade, 1.0, {})
     assert decision.amount == 0
 
 
@@ -478,8 +549,6 @@ def harness(tmp_path):
     sell_script.price_tracking.clear()
     sell_script._retry_after.clear()
     sell_script._empty_since.clear()
-    sell_script._decision_pending_since.clear()
-    sell_script._rate_limited_until.clear()
     sell_script._last_activity.clear()
     sell_script._no_price_warned_until.clear()
     sell_script._stream_was_connected = False

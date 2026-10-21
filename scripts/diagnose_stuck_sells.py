@@ -16,6 +16,7 @@ the "solivox" service uses:
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,14 @@ def main() -> int:
             print(f"  drop_cutoff        = {trade_data.drop_cutoff}%  "
                   f"(enabled={getattr(trade_data, 'drop_cutoff_enabled', True)})")
             print(f"  drop_until_profit  = {trade_data.drop_until_profit}%")
+            failsafe_seconds = getattr(trade_data, "critical_failsafe_seconds", None) or 5.0
+            if trade_data.created_at:
+                elapsed = (datetime.utcnow() - trade_data.created_at).total_seconds()
+                print(f"  created_at         = {trade_data.created_at} ({elapsed:.1f}s ago)")
+            else:
+                print("  created_at         = None (force-sell timer can never fire for this trade)")
+            print(f"  critical_failsafe  = {failsafe_seconds:.0f}s  "
+                  f"(enabled={getattr(trade_data, 'critical_failsafe_enabled', True)})")
             print(f"  sell_at_100/200/300/400/600/800/1000/1500/2500/4000/10000 = "
                   f"{getattr(trade_data, 'sell_at_100', None)}/"
                   f"{trade_data.sell_at_200}/{getattr(trade_data, 'sell_at_300', None)}/"

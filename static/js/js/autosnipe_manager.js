@@ -63,7 +63,7 @@ function createCardElement(sniper) {
         <p class="mb-1">Sell drop cutoff: <strong>${sniper.drop_cutoff}</strong>% • Until profit: <strong>${sniper.drop_until_profit}</strong>%</p>
         <p class="mb-1">Sell targets: 100%:<strong>${sniper.sell_at_100 ?? 10}</strong>% 200%:<strong>${sniper.sell_at_200}</strong>% 300%:<strong>${sniper.sell_at_300 ?? 10}</strong>% 400%:<strong>${sniper.sell_at_400}</strong>% 600%:<strong>${sniper.sell_at_600 ?? 10}</strong>% 800%:<strong>${sniper.sell_at_800 ?? 10}</strong>% 1000%:<strong>${sniper.sell_at_1000}</strong>%</p>
         <p class="mb-1">Inactivity sell: <strong>${sniper.inactivity_sell_enabled !== false ? 'On' : 'Off'}</strong>${sniper.inactivity_sell_enabled !== false ? ` • ${sniper.inactivity_sell_seconds ?? 5}s` : ''}</p>
-        <p class="mb-1">Decision fail-safe: <strong>${sniper.critical_failsafe_enabled !== false ? 'On' : 'Off'}</strong>${sniper.critical_failsafe_enabled !== false ? ` • ${sniper.critical_failsafe_seconds ?? 5}s` : ''}</p>
+        <p class="mb-1">Force-sell timer: <strong>${sniper.critical_failsafe_enabled !== false ? 'On' : 'Off'}</strong>${sniper.critical_failsafe_enabled !== false ? ` • ${sniper.critical_failsafe_seconds ?? 5}s` : ''}</p>
         <p class="mb-0">Status: ${sniper.active ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Inactive</span>'}</p>
       </div>
     </div>

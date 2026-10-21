@@ -116,15 +116,6 @@ SNIPER_SELL_RETRY_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_RETRY_COOLDOWN_SEC
 # down - observed causing a large backlog of simultaneously-due sells to keep
 # re-triggering 429s instead of draining.
 SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC = float(os.getenv("SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC", "20"))
-# Fail-safe (client request): once a sell decision has fired (take-profit,
-# stop-loss, trailing-stop-after-peak, inactivity - whichever rule), if it's
-# still sitting un-sold this many seconds later - e.g. stuck behind an
-# EMPTY/RETRY cooldown set by an earlier, unrelated failed attempt - force
-# the next cycle tick to retry immediately instead of waiting out that
-# cooldown. Does NOT override an active rate-limit (429) backoff - retrying
-# through that defeats the whole reason SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC
-# exists (see its own comment).
-SNIPER_SELL_CRITICAL_FAILSAFE_SEC = float(os.getenv("SNIPER_SELL_CRITICAL_FAILSAFE_SEC", "5"))
 # Momentum-exit rule: a position whose token has had no detected trade for
 # this long is sold in full, regardless of price - once a token stops
 # trading, holding longer offers no new signal either way for a sniper

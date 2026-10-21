@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 # (price multiplier threshold, Trade attribute holding the % to sell, label).
@@ -70,6 +71,25 @@ def evaluate_autosnipe_sell(trade_data, current_price, price_tracking_map=None) 
     # FIELD_3: sell if drop from buy price
     if drop_cutoff_on and current_price < initial_price * ((100 - trade_data.drop_cutoff) / 100):
         return SellDecision(amount, f"Auto-Sell All: Drops below {trade_data.drop_cutoff}%")
+
+    # Critical fail-safe (client request): N seconds after purchase, if the
+    # trade has neither hit its stop-loss (drop_cutoff, checked above - if it
+    # had fired, we'd already have returned) nor reached 100% profit yet,
+    # force a full exit at whatever the current price is instead of leaving
+    # the position open indefinitely waiting for one of those two outcomes.
+    # Checked against the price at the exact moment the timer elapses, not a
+    # peak - a brief earlier spike to 100%+ that has since pulled back still
+    # counts as "not achieved" here.
+    critical_failsafe_on = sniper_flag_enabled(trade_data, "critical_failsafe_enabled")
+    purchased_at = getattr(trade_data, "created_at", None)
+    if critical_failsafe_on and purchased_at and profit_multiplier < 2.0:
+        elapsed_sec = (datetime.utcnow() - purchased_at).total_seconds()
+        failsafe_threshold = getattr(trade_data, "critical_failsafe_seconds", None) or 5.0
+        if elapsed_sec >= failsafe_threshold:
+            return SellDecision(
+                amount,
+                f"Auto-Sell All: {failsafe_threshold:.0f}s elapsed without reaching 100% profit or stop-loss",
+            )
 
     # drop_until_profit is intentionally not a gate here. It used to return
     # "skip" whenever profit_multiplier * 100 >= drop_until_profit; with the

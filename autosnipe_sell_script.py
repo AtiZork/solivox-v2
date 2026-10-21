@@ -32,7 +32,6 @@ from settings import (
     SNIPER_SELL_CYCLE_INTERVAL_SEC,
     SNIPER_SELL_YELLOWSTONE_COOLDOWN_SEC,
     SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC,
-    SNIPER_SELL_CRITICAL_FAILSAFE_SEC,
     SNIPER_SELL_INACTIVITY_ENABLED,
     SNIPER_SELL_INACTIVITY_SEC,
     SNIPER_SELL_INACTIVITY_SWEEP_SEC,
@@ -186,16 +185,6 @@ _trade_locks_guard = threading.Lock()
 _retry_after: dict = {}
 # trade id -> time.monotonic() its wallet balance was first read as 0
 _empty_since: dict = {}
-# trade id -> time.monotonic() a sell decision (any rule) first fired and
-# hasn't sold yet. Client request: a fail-safe so a decision never silently
-# sits behind an EMPTY/RETRY cooldown from an earlier, unrelated failed
-# attempt for longer than the per-trade/per-config threshold - see
-# _critical_failsafe_enabled_for/_critical_failsafe_threshold_for.
-_decision_pending_since: dict = {}
-# trade id -> time.monotonic() an active 429 rate-limit backoff expires.
-# Tracked separately so the fail-safe above can skip overriding *this*
-# cooldown specifically - see _critical_failsafe_threshold_for's comment.
-_rate_limited_until: dict = {}
 _UNROUTABLE_QUOTE_ERRORS = {"TOKEN_NOT_TRADABLE", "NO_ROUTES_FOUND"}
 
 # mint -> time.monotonic() of its last detected trade, or of the moment we
@@ -269,36 +258,14 @@ def process_trade_sell(
             cooldown = SNIPER_SELL_RATE_LIMIT_COOLDOWN_SEC if rate_limited else SNIPER_SELL_RETRY_COOLDOWN_SEC
             _retry_after[trade_data.id] = time.monotonic() + cooldown
             timer.fields["cooldown_sec"] = cooldown
-            if rate_limited:
-                _rate_limited_until[trade_data.id] = _retry_after[trade_data.id]
-            else:
-                _rate_limited_until.pop(trade_data.id, None)
         elif outcome == "sold":
             _retry_after.pop(trade_data.id, None)
-            _rate_limited_until.pop(trade_data.id, None)
-            _decision_pending_since.pop(trade_data.id, None)
     finally:
         lock.release()
         # Only attempts where a sell rule fired: price checks without a
         # decision run on every trade of the token and would flood the log.
         if outcome not in (None, "cooling"):
             timer.finish(outcome)
-
-
-def _critical_failsafe_enabled_for(trade_data) -> bool:
-    """Per-trade/per-config enable flag for the fail-safe below (client
-    request) - same default-true-if-missing pattern as every other sniper
-    enable flag (_inactivity_enabled_for etc.), no separate global switch."""
-    value = getattr(trade_data, "critical_failsafe_enabled", None)
-    return True if value is None else bool(value)
-
-
-def _critical_failsafe_threshold_for(trade_data) -> float:
-    """Per-trade/per-config fail-safe threshold (seconds). Missing/None/zero
-    falls back to the global SNIPER_SELL_CRITICAL_FAILSAFE_SEC default - same
-    pattern as _inactivity_threshold_for."""
-    value = getattr(trade_data, "critical_failsafe_seconds", None)
-    return float(value) if value else SNIPER_SELL_CRITICAL_FAILSAFE_SEC
 
 
 def _sell_if_due(
@@ -360,26 +327,9 @@ def _sell_if_due(
                 db.session.rollback()
     amount_to_trade, message = decision.amount, decision.message
     if amount_to_trade <= 0:
-        _decision_pending_since.pop(trade_data.id, None)
         return
 
-    now = time.monotonic()
-    # Fail-safe (client request, per-config like every other sniper rule -
-    # see _critical_failsafe_enabled_for/_critical_failsafe_threshold_for):
-    # a decision that's been sitting un-sold past the configured threshold -
-    # stuck behind an EMPTY/RETRY cooldown an earlier, unrelated failed
-    # attempt set - gets forced through on this tick instead of waiting the
-    # cooldown out. Never overrides an active rate-limit backoff (see
-    # _rate_limited_until's comment) - retrying through a 429 makes that
-    # specific problem worse, not better.
-    if _critical_failsafe_enabled_for(trade_data):
-        first_decided = _decision_pending_since.setdefault(trade_data.id, now)
-        overdue = (now - first_decided) >= _critical_failsafe_threshold_for(trade_data)
-    else:
-        _decision_pending_since.pop(trade_data.id, None)
-        overdue = False
-    still_rate_limited = now < _rate_limited_until.get(trade_data.id, 0)
-    if now < _retry_after.get(trade_data.id, 0) and not (overdue and not still_rate_limited):
+    if time.monotonic() < _retry_after.get(trade_data.id, 0):
         return "cooling"
     trade_ref = f"trade {trade_data.id} ({trade_data.token_address})"
     logger.info(

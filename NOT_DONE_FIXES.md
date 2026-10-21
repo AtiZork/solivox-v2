@@ -445,6 +445,46 @@ is respected - doesn't fire at the 5s global default, only once its own longer v
 386/386 passing, confirmed the new columns exist on the live DB after import, clean import under
 the real `so-venv`.
 
+### Correction #2: the feature was solving the wrong problem entirely — ✅ DONE
+Deployed the above, then a live trade (`diagnose_stuck_sells.py` on trade #1760) showed "no sell"
+while only -4.4% off buy — correctly not selling, but the user expected the 5s timer to have force-
+sold it by then. Client's original WhatsApp wording, read literally this time: *"once a token is
+purchased: start timer for 5 sec, after 5 sec if neither of the sell condition are achieved (take
+profit at 100% or stop loss) sell it."* What shipped in Correction #1 only sped up **retrying** an
+already-fired decision stuck behind a cooldown — it never force-sells a token just sitting between
+the two thresholds with no decision having fired at all. That's a different mechanism. Rebuilt:
+
+- `autosnipe_sell_logic.py` (`evaluate_autosnipe_sell`): new check placed right after the
+  `drop_cutoff` (stop-loss) check, before the take-profit/trailing-stop logic. If
+  `critical_failsafe_enabled` is on, `Trade.created_at` is set, and the price hasn't reached 100%
+  profit (`profit_multiplier >= 2.0`) *at this exact moment*, once `critical_failsafe_seconds` have
+  elapsed since purchase it returns a forced full-position `SellDecision` regardless of current
+  price. Stop-loss already having fired is handled for free by evaluation order - that check runs
+  first and returns before this one is ever reached. Deliberately point-in-time, not peak-based: a
+  brief earlier spike to 100%+ that has since pulled back does NOT count as "achieved" (confirmed
+  with the user - this was one of two explicit disambiguation questions asked before rebuilding,
+  the other being whether to reuse the trade's existing stop-loss/100%-profit fields rather than
+  adding separate dedicated ones - user confirmed reuse the existing fields both times).
+- `autosnipe_sell_script.py`: the entire Correction #1 mechanism removed - `_decision_pending_since`
+  / `_rate_limited_until` dicts, `_critical_failsafe_enabled_for`/`_critical_failsafe_threshold_for`
+  helpers, and the cooldown-override branch in `_sell_if_due` (reverted to the plain
+  `now < _retry_after.get(...)` check it was before this feature existed). The config fields
+  (`critical_failsafe_enabled`/`critical_failsafe_seconds`) are unchanged - no new columns, no
+  migration - only what they *control* changed, from "retry sooner" to "force-exit at T+N".
+- `settings.py`: removed the now-unused `SNIPER_SELL_CRITICAL_FAILSAFE_SEC` global - the per-trade
+  DB column (`NOT NULL DEFAULT 5`) is the only source of the threshold now, same as `drop_cutoff`
+  has no global-settings fallback either.
+- UI label updated on both edit surfaces (`templates/autosnipe.html`, `templates/base.html`,
+  `static/js/js/autosnipe_manager.js`'s summary line) from "fail-safe if a decision hasn't sold
+  within" to "force-sell if neither 100% profit nor stop-loss is hit within" - field IDs/payload
+  keys unchanged, so nothing else needed touching.
+- Replaced all 7 Correction #1 tests (which tested the wrong mechanism) with 7 new tests against
+  `evaluate_autosnipe_sell` directly: fires on a flat price past the threshold, doesn't fire before
+  the threshold, doesn't override an already-fired stop-loss, doesn't fire once 100% profit is
+  actually reached, respects the per-trade enabled=False, respects a custom threshold over the 5s
+  default, and never fires for a trade with no `created_at` (backward compatibility for any caller
+  that doesn't pass one). 386/386 passing (net zero test-count change - 7 removed, 7 added).
+
 ======================================================================
 ## PROPOSED WORKING ORDER (today)
 ======================================================================
