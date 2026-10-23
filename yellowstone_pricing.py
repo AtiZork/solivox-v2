@@ -23,17 +23,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import grpc
-
-from settings import (
-    GEYSER_GRPC_TOKEN,
-    GEYSER_GRPC_URL,
-    GEYSER_PRICE_TIMEOUT_SEC,
-    GEYSER_USE_TLS,
-    USE_GEYSER,
-)
+from settings import GEYSER_GRPC_URL, USE_GEYSER
 from shyft_pricing import ShyftPricingService, get_shyft_pricing_service
-from yellowstone_grpc.generated import geyser_pb2, geyser_pb2_grpc
+from yellowstone_cache import get_cached_curve_raw, get_cached_pool_metadata, set_cached_curve_raw
 
 logger = logging.getLogger(__name__)
 
@@ -47,74 +39,44 @@ def is_yellowstone_enabled() -> bool:
     return bool(USE_GEYSER and GEYSER_GRPC_URL)
 
 
-def _build_channel() -> grpc.Channel:
-    endpoint = GEYSER_GRPC_URL.replace("http://", "").replace("https://", "")
-    if GEYSER_USE_TLS:
-        return grpc.secure_channel(
-            endpoint,
-            grpc.ssl_channel_credentials(),
-            compression=grpc.Compression.Gzip,
-        )
-    return grpc.insecure_channel(endpoint, compression=grpc.Compression.Gzip)
+def _fetch_bonding_curve_account(bonding_curve_pubkey: str) -> bytes:
+    """
+    Latest bonding-curve raw bytes from the always-on yellowstone_cache
+    (one persistent, program-wide subscription - see yellowstone_cache.py)
+    instead of opening a new short-lived subscription per call.
 
+    On a cache miss (a brand-new mint the cache hasn't seen a trade for
+    yet), seeds it with a single RPC read and lets the live stream
+    overwrite it the next time this curve trades.
+    """
+    cached = get_cached_curve_raw(bonding_curve_pubkey)
+    if cached:
+        return cached
 
-def _call_metadata() -> tuple:
-    if GEYSER_GRPC_TOKEN:
-        return (("x-token", GEYSER_GRPC_TOKEN),)
-    return ()
-
-
-def _subscribe_request(bonding_curve_pubkey: str) -> geyser_pb2.SubscribeRequest:
-    req = geyser_pb2.SubscribeRequest()
-    req.accounts["sell_price"].account.append(bonding_curve_pubkey)
-    req.commitment = geyser_pb2.CommitmentLevel.PROCESSED
-    return req
-
-
-def _request_iterator(request: geyser_pb2.SubscribeRequest):
-    yield request
-
-
-def _fetch_bonding_curve_account(
-    bonding_curve_pubkey: str, timeout_sec: float
-) -> bytes:
-    """Open a short-lived Yellowstone subscription and return the first account payload."""
-    channel = _build_channel()
-    try:
-        stub = geyser_pb2_grpc.GeyserStub(channel)
-        call = stub.Subscribe(
-            _request_iterator(_subscribe_request(bonding_curve_pubkey)),
-            timeout=timeout_sec,
-            metadata=_call_metadata(),
-        )
-        try:
-            for update in call:
-                if update.HasField("account"):
-                    data = bytes(update.account.account.data)
-                    if data:
-                        return data
-            raise YellowstonePricingError(
-                f"Yellowstone stream ended without an account update for {bonding_curve_pubkey}"
-            )
-        finally:
-            call.cancel()
-    except grpc.RpcError as exc:
-        code = exc.code() if hasattr(exc, "code") else None
+    raw = get_shyft_pricing_service()._get_account_bytes(bonding_curve_pubkey)
+    if not raw:
         raise YellowstonePricingError(
-            f"Yellowstone gRPC error ({code}) for {bonding_curve_pubkey}: {exc.details() if hasattr(exc, 'details') else exc}"
-        ) from exc
-    finally:
-        channel.close()
+            f"No cached or on-chain bonding-curve data found for {bonding_curve_pubkey}"
+        )
+    set_cached_curve_raw(bonding_curve_pubkey, raw)
+    return raw
 
 
 def _pumpswap_fallback(mint: str) -> dict[str, Any]:
     """
-    Price a migrated token from its PumpSwap pool (live RPC read of the two
-    vault balances — never frozen like a completed bonding curve, and more
-    appropriate than a gRPC subscribe-and-wait for a point-in-time read).
+    Price a migrated token from its PumpSwap pool. Pool *discovery*
+    (address/vaults) comes from yellowstone_cache when available - the
+    always-on subscription knows a pool exists the instant it's created
+    on-chain, closing the multi-second gap getProgramAccounts has right
+    after a migration before the pool is indexed/queryable. The two vault
+    balances that actually determine price are still a live RPC read either
+    way (shyft_pricing.get_pumpswap_pool_price) - that part was never slow.
     """
+    cached_pool = get_cached_pool_metadata(mint)
     try:
-        price = get_shyft_pricing_service().get_pumpswap_pool_price(mint)
+        price = get_shyft_pricing_service().get_pumpswap_pool_price(
+            mint, cached_pool_metadata=cached_pool
+        )
     except Exception as exc:
         raise YellowstonePricingError(
             f"token {mint} has migrated off the Pump.fun bonding curve and its "
@@ -134,9 +96,9 @@ def get_yellowstone_price(token_mint: str) -> dict[str, Any]:
     """
     Fetch the latest live price for a mint via Yellowstone gRPC.
 
-    While the token is still on its Pump.fun bonding curve, this subscribes
-    to the curve account and returns the live-pushed price. Once the token
-    has migrated (graduated) to PumpSwap, the bonding curve is permanently
+    While the token is still on its Pump.fun bonding curve, this reads its
+    latest price from the always-on yellowstone_cache. Once the token has
+    migrated (graduated) to PumpSwap, the bonding curve is permanently
     frozen, so this instead reads the live price from the PumpSwap pool.
 
     Returns a dict shaped like shyft_pricing.get_token_price()'s output
@@ -164,11 +126,12 @@ def get_yellowstone_price(token_mint: str) -> dict[str, Any]:
         raise YellowstonePricingError(f"Could not resolve mint {mint}: {exc}") from exc
 
     # Cheap pre-check: a migrated bonding curve will never deliver another
-    # account update, so don't waste the subscribe timeout waiting for one.
+    # account update, so go straight to the PumpSwap path instead of reading
+    # its now-permanently-frozen final cached/on-chain state.
     if get_shyft_pricing_service().is_bonding_curve_migrated(mint):
         return _pumpswap_fallback(mint)
 
-    raw = _fetch_bonding_curve_account(str(bonding_curve), GEYSER_PRICE_TIMEOUT_SEC)
+    raw = _fetch_bonding_curve_account(str(bonding_curve))
 
     if ShyftPricingService._bonding_curve_is_complete(raw):
         # Migrated during our subscription wait — fall back instead of
@@ -197,7 +160,7 @@ def get_yellowstone_price(token_mint: str) -> dict[str, Any]:
         "price_in_sol": price_sol,
         "usd_price": usd_price,
         "sol_price_usd": sol_usd,
-        "source": "yellowstone_grpc_accountSubscribe",
+        "source": "yellowstone_grpc_cached",
         "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
         "timestamp_unix": now,
     }

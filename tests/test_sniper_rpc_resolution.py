@@ -27,6 +27,15 @@ FIXTURE = Path(__file__).parent / "fixtures_v1_pump_buy_tx.json"
 FIXTURE_SIG = "43LM8cNAEFC4Dn2wX1pswLXrPjigik6idY6QPZk2APJG8u6vtpQBBarPJN4UTnxiNXwXERpy9AEGmuCKfxFApSva"
 FIXTURE_MINT = "BbwMpDMkXf4VE8p2gBFPnv1sP8kwHmmHyP7ma6yfpump"
 
+# A real, live Create transaction for a mint that does NOT end in "pump" -
+# before the fix, _mint_from_tx_value's suffix check meant this (and every
+# token like it) was never detected, logged, or bought at all. Confirmed
+# against the actual live chain: three such mints reported by the user were
+# all completely invisible in production logs; this fixture is one of them.
+NO_SUFFIX_FIXTURE = Path(__file__).parent / "fixtures_v1_pump_create_tx_no_suffix.json"
+NO_SUFFIX_FIXTURE_SIG = "3Dw9aSYoutxLiVcjfUqFMvtqy57KgfUdWZvSdqfKp3TttiRy2NmqyDeWo9b2RTCY8GK4drQugD6d6uhSEP23PcXb"
+NO_SUFFIX_FIXTURE_MINT = "HrM9Cb2YzHBxJswbwJt4BFMgz2ehcfj6TNSdCJNLmwxJ"
+
 
 @pytest.fixture
 def no_sleep():
@@ -96,6 +105,31 @@ def test_real_version_1_buy_tx_resolves_mint_and_sol(stats):
         sol = ss._resolve_buy_amount(FIXTURE_MINT, FIXTURE_SIG)
     assert mint == FIXTURE_MINT
     assert sol == pytest.approx(0.044938377)
+
+
+def test_mint_without_pump_suffix_still_resolves_via_pda_match():
+    """
+    Pump.fun's "pump" vanity suffix is a branding convention, not a protocol
+    requirement - a mint without it is still a completely real, legitimate
+    token. Before this fix, the suffix check in _mint_from_tx_value (and the
+    equivalent one in the fast log-scanning path) meant such a token was
+    never detected at all: not logged, not evaluated, not bought - silently
+    invisible, confirmed against three real production cases.
+
+    Fix: fall back to deriving each account's bonding-curve PDA
+    (ShyftPricingService.bonding_curve_pda, already used/tested elsewhere)
+    and checking whether that PDA is ALSO present in the same transaction's
+    account list - a structural relationship true for every Pump.fun Create
+    transaction regardless of the mint's address pattern.
+    """
+    resp = GetTransactionResp.from_json(NO_SUFFIX_FIXTURE.read_text())
+    tx = resp.value
+    assert tx.transaction.version == 1
+
+    mint = ss._mint_from_tx_value(tx)
+
+    assert mint == NO_SUFFIX_FIXTURE_MINT
+    assert not mint.endswith("pump")
 
 
 def test_throttle_disabled_at_zero_never_takes_lock_or_sleeps(no_sleep):

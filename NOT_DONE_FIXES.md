@@ -8,6 +8,11 @@ Working order: top to bottom within each section. Items flagged **NEEDS YOUR CAL
 decision you already made this session in the opposite direction — not starting those until
 you confirm, to avoid re-litigating settled choices.
 
+This file remains the short-form running log. For a formal client request going forward, start with
+the `solivox-workflow` skill (see root `CLAUDE.md` and `docs/engineering/README.md`) - it produces
+fuller investigation/architecture/review documents for anything non-trivial, and a confirmed
+decision register at `docs/engineering/decision_register.md`.
+
 ======================================================================
 ## SECTION 1 — P0 (live risk, small effort)
 ======================================================================
@@ -555,4 +560,94 @@ changes) - confirmed `main.py` has no raw SQL referencing `created_at` that woul
 7. 1.7 (route-auth enumeration test) — ✅ DONE
 8. 1.8 (CI) — separate, infra-only, last item in Section 1 — still open, needs your platform call
 9. Section 3 (3.1-3.5, new dashboards) — ✅ DONE
+
+### Persistent Yellowstone price cache (bonding curve + PumpSwap pool discovery) — ✅ DONE
+Client request (Mansoor Bai, via WhatsApp doc) to fix two confirmed, log-traced sell-latency bugs:
+a quiet token's Yellowstone price check waiting out the full `GEYSER_PRICE_TIMEOUT_SEC` (8s) because
+`yellowstone_pricing.py` used to open a brand-new, short-lived subscription per price check instead
+of a persistent one (traced Oct 21/23, e.g. trade `3itWj2s5...`); and a migrated token's new PumpSwap
+pool not being indexed/queryable yet right after migration, observed as an **18-second** gap with
+zero active sell protection (trade #1846, mint `8cswwN...`).
+
+Planned properly first (3 parallel Explore agents + 2 scope-clarifying questions before writing any
+code) rather than implementing the WhatsApp doc's suggestion blind - confirmed the discriminator
+bytes it proposed weren't needed/verified, found that PumpSwap pricing needs a second RPC step
+(reserve balances live in separate SPL-token vault accounts, not the pool account itself) that the
+doc didn't account for, and confirmed buy-time pricing never touches Yellowstone today (kept
+out of scope, per user confirmation).
+
+- New `yellowstone_cache.py`: one persistent background thread (same reconnect/backoff shape as
+  `sniper_stream.py`, no asyncio needed since Yellowstone's existing grpc usage is already a plain
+  blocking stub) subscribes once, at startup, to every account owned by the pump.fun bonding-curve
+  program and every PumpSwap pool account (`owner` + `datasize` filters only — deliberately **no**
+  unverified discriminator bytes; both filter values reused are already relied on by live production
+  code). Keeps two locked in-memory caches (mirroring `SniperStreamState`'s pattern): bonding-curve
+  PDA -> raw bytes, and mint -> parsed PumpSwap pool metadata.
+- `yellowstone_pricing.py`: `_fetch_bonding_curve_account`/`_pumpswap_fallback` now read from this
+  cache first (falling back to one RPC seed call on a genuine miss) instead of opening a new
+  subscription/relying on `getProgramAccounts` every time. `get_yellowstone_price()`'s external
+  contract (return shape, `YellowstonePricingError`) is unchanged — confirmed via research that
+  every caller only reads `usdPrice`/`source`/`timestamp` — so this was a pure internals swap.
+  `source` changed to `"yellowstone_grpc_cached"` so the new path is directly observable in
+  `journalctl` after deploy.
+- `shyft_pricing.get_pumpswap_pool_price`: one new optional `cached_pool_metadata` parameter: when
+  given (from the new cache), skips the slow pool-discovery RPC entirely and goes straight to the
+  two vault-balance reads + existing price math. Every existing caller (none pass it) behaves
+  identically to before.
+- `main.py`: one new line (`start_yellowstone_cache()`) inside the existing `WERKZEUG_RUN_MAIN`
+  startup block, same pattern as every other background starter.
+- Tests: new `tests/test_yellowstone_cache.py` (12 tests - filter shape, update routing/parsing,
+  malformed-data resilience, cache round-trips, start/stop idempotency, reconnect backoff doesn't
+  crash), `tests/test_yellowstone_pricing.py` rewritten (the 3 old per-call-subscribe tests replaced
+  with cache-hit/cache-miss-seeds-via-RPC tests; every other existing test needed only a source-label/
+  call-arg update, confirming the external contract really didn't change), 2 new
+  `tests/test_shyft_pricing.py` tests for the `cached_pool_metadata` parameter. 400/400 passing
+  (14 net new).
+- **Live-verified against a real Yellowstone endpoint**, not just mocked: this dev machine's own
+  `.env` has `USE_GEYSER=true` pointed at Shyft's hosted gateway. Started the cache for real, it
+  connected and received real account updates within 1 second (3 curves, 5 pools cached), and a
+  real cached curve's bytes fed through the *existing* production parser
+  (`ShyftPricingService._price_sol_from_bonding_raw`) produced a sane price; a real cached pool's
+  metadata showed a valid pump.fun mint, WSOL quote, and sane reserve values. This confirms the
+  owner+datasize-only filtering (no discriminator) actually matches the right accounts on a real
+  endpoint, not just in theory.
+- **Not yet verified**: the production server's own `GEYSER_GRPC_URL` (likely the local `ahmad-colo`
+  validator's own geyser plugin, not this dev machine's remote Shyft gateway) — that validator was
+  stalled (frozen slot) as of the investigation earlier today, a separate infra issue. Once it's
+  healthy, confirm on the live server: a `"[YellowstoneCache] connected..."` log line at startup,
+  the new `"yellowstone_grpc_cached"` source label showing up in sell-decision logs, and a
+  migrated-token trade no longer showing an 18s "no PumpSwap pool found" gap.
+
+### Bug: tokens without the "pump" vanity suffix in their mint address were never detected at all — ✅ FIXED
+User noticed a pattern while diagnosing several "never bought, zero log trace" tokens
+(`HrM9Cb2YzHBxJswbwJt4BFMgz2ehcfj6TNSdCJNLmwxJ`, `B2UmVQgjKCi3xj7SzJNwtyHJ2sb4KCesnU8AgVcTWJ3F`,
+`ecatcLBCFkbNWxrdpDtGnZkVcKThqFXHPs7jUT1XJ7L`): none of their mint addresses end in "pump". Checked
+the code and confirmed this is a real, deterministic bug, not load/timing - three separate places
+in `sniper_stream.py` required `addr.endswith("pump")` before accepting an account as the mint:
+the fast no-RPC log-regex path (`_PUMP_MINT_RE`, `_extract_pump_mints_from_logs`) and **both**
+branches of the RPC fallback (`_mint_from_tx_value`). The "pump" suffix is Pump.fun's own deployer
+tool grinding a vanity address for branding - not a requirement of the underlying program - so any
+token created without that grind (a different launcher, a manual deploy, a failed/skipped grind)
+was **completely invisible** to the bot: never logged, never evaluated, never bought, regardless of
+server load or conditions.
+
+Fix, in `_mint_from_tx_value` (`sniper_stream.py`): keep the "pump" suffix check first (free, matches
+the common case instantly), but fall back to a self-validating check that doesn't depend on any
+suffix convention or account ordering - the bonding curve PDA is deterministically derived from the
+mint by Pump.fun's own program (`ShyftPricingService.bonding_curve_pda`, already used/tested
+elsewhere in this codebase). Whichever account in the transaction, when used to derive that PDA,
+produces *another account already present in the same transaction*, is the mint - a structural
+relationship true for every Create transaction regardless of the mint's address pattern. The fast
+log-scanning path (pure text, no structured account data) can't apply this check and still relies on
+the suffix - that's fine, since a miss there now correctly falls through to the robust RPC path
+instead of giving up.
+
+Verified against real, live on-chain data for two of the three reported mints (not mocked): fetched
+each one's actual Create transaction via RPC (had to paginate deep into their trading history to
+reach genesis - both turned out to be very actively traded), ran it through the fixed function, and
+confirmed it resolves the exact correct mint both times. Added a permanent regression test using a
+captured real Create transaction as a fixture (`tests/fixtures_v1_pump_create_tx_no_suffix.json`,
+matching the existing `fixtures_v1_pump_buy_tx.json` convention), in
+`tests/test_sniper_rpc_resolution.py`. 401/401 tests passing, no regressions to the normal
+suffix-matching fast path.
 

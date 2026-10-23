@@ -558,7 +558,9 @@ class ShyftPricingService:
         cache[mint] = result[0]["pubkey"]
         return cache[mint]
 
-    def get_pumpswap_pool_price(self, mint: str) -> dict[str, Any]:
+    def get_pumpswap_pool_price(
+        self, mint: str, cached_pool_metadata: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
         """
         Fetch the live price of a migrated token from its PumpSwap pool.
 
@@ -567,28 +569,47 @@ class ShyftPricingService:
         (per Pump.fun's own PumpSwap docs). Reserves are read live from the
         pool's two SPL token vault accounts — never frozen like a completed
         bonding curve.
+
+        cached_pool_metadata: optional pre-resolved {pool_pubkey, base_mint,
+        quote_mint, base_vault, quote_vault, virtual_quote_reserves} (from
+        yellowstone_cache's always-warm pool subscription). When given, skips
+        find_pumpswap_pool's getProgramAccounts lookup and the pool account's
+        own getAccountInfo read entirely - both of which can lag for several
+        seconds right after a migration before the new pool is indexed/
+        queryable. Every existing caller omits this and behaves exactly as
+        before.
         """
         mint = (mint or "").strip()
         if not mint:
             raise ShyftPricingError("mint address is required")
 
-        pool_addr = self.find_pumpswap_pool(mint)
-        if not pool_addr:
-            raise ShyftPricingError(f"no PumpSwap pool found for migrated mint {mint}")
+        if cached_pool_metadata is not None:
+            pool_addr = cached_pool_metadata["pool_pubkey"]
+            base_mint = cached_pool_metadata["base_mint"]
+            quote_mint = cached_pool_metadata["quote_mint"]
+            base_vault = cached_pool_metadata["base_vault"]
+            quote_vault = cached_pool_metadata["quote_vault"]
+            virtual_quote_reserves = cached_pool_metadata["virtual_quote_reserves"]
+        else:
+            pool_addr = self.find_pumpswap_pool(mint)
+            if not pool_addr:
+                raise ShyftPricingError(f"no PumpSwap pool found for migrated mint {mint}")
 
-        raw = self._get_account_bytes(pool_addr)
-        if not raw or len(raw) < _PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET + 16:
-            raise ShyftPricingError(f"PumpSwap pool account malformed for mint {mint}")
+            raw = self._get_account_bytes(pool_addr)
+            if not raw or len(raw) < _PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET + 16:
+                raise ShyftPricingError(f"PumpSwap pool account malformed for mint {mint}")
 
-        base_mint = str(Pubkey.from_bytes(raw[_PUMPSWAP_BASE_MINT_OFFSET : _PUMPSWAP_BASE_MINT_OFFSET + 32]))
-        quote_mint = str(Pubkey.from_bytes(raw[_PUMPSWAP_QUOTE_MINT_OFFSET : _PUMPSWAP_QUOTE_MINT_OFFSET + 32]))
-        base_vault = str(Pubkey.from_bytes(raw[_PUMPSWAP_BASE_VAULT_OFFSET : _PUMPSWAP_BASE_VAULT_OFFSET + 32]))
-        quote_vault = str(Pubkey.from_bytes(raw[_PUMPSWAP_QUOTE_VAULT_OFFSET : _PUMPSWAP_QUOTE_VAULT_OFFSET + 32]))
-        virtual_quote_reserves = int.from_bytes(
-            raw[_PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET : _PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET + 16],
-            "little",
-            signed=True,
-        )
+            base_mint = str(Pubkey.from_bytes(raw[_PUMPSWAP_BASE_MINT_OFFSET : _PUMPSWAP_BASE_MINT_OFFSET + 32]))
+            quote_mint = str(Pubkey.from_bytes(raw[_PUMPSWAP_QUOTE_MINT_OFFSET : _PUMPSWAP_QUOTE_MINT_OFFSET + 32]))
+            base_vault = str(Pubkey.from_bytes(raw[_PUMPSWAP_BASE_VAULT_OFFSET : _PUMPSWAP_BASE_VAULT_OFFSET + 32]))
+            quote_vault = str(
+                Pubkey.from_bytes(raw[_PUMPSWAP_QUOTE_VAULT_OFFSET : _PUMPSWAP_QUOTE_VAULT_OFFSET + 32])
+            )
+            virtual_quote_reserves = int.from_bytes(
+                raw[_PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET : _PUMPSWAP_VIRTUAL_QUOTE_RESERVES_OFFSET + 16],
+                "little",
+                signed=True,
+            )
 
         if base_mint != mint:
             raise ShyftPricingError(f"PumpSwap pool base_mint mismatch for {mint}")

@@ -261,6 +261,10 @@ if __name__ == "__main__":
 
        start_sniper_ingestion()
 
+       from yellowstone_cache import start_yellowstone_cache
+
+       start_yellowstone_cache()
+
        from dashboard_models import start_latency_snapshot_scheduler
 
        start_latency_snapshot_scheduler(app)
