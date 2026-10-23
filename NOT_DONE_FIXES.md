@@ -507,6 +507,41 @@ none; its numeric fields are sent as plain `parseFloat(...)` with no fallback, s
 affected. `node --check` passed; manually verified the new helpers with `node -e` (`0` -> `0`,
 empty/`undefined` -> fallback).
 
+### Bug: force-sell timer fired ~2.4s early — Trade.created_at used Postgres's transaction-start time, not real insert time — ✅ FIXED
+User report: a live trade (mint `FNCt2XjEy3ssi7aC9vn2S3KXm2zHAxmYQN8yWLGupump`, trade #1840) force-sold
+with the log line "Auto-Sell All: 5s elapsed without reaching 100% profit or stop-loss" - but
+working through the actual log timestamps (buy completion ~07:09:17.32, decision fired 07:09:19.942)
+showed only ~2.6 real seconds had passed, not 5. The log message itself is misleading here - it
+always prints the *configured threshold*, not the measured elapsed time.
+
+Investigated rather than guessed: first hypothesis was a clock-skew between the app server and the
+DB server. Ruled out empirically - had the user run `date -u` and
+`sudo -u postgres psql -t -c "SELECT NOW() AT TIME ZONE 'UTC';"` back-to-back on the live server;
+both agreed to the second.
+
+Real root cause: `Trade.created_at` used `db.Column(db.DateTime, default=db.func.now())` - a
+server-side default, meaning the literal `now()` call gets embedded in the INSERT statement itself.
+Postgres's `now()` (unlike `clock_timestamp()`) returns the **start time of the enclosing
+transaction**, not the moment the statement actually executes. `_buy_token_internal` runs a dedup
+`Trade.query.filter_by(...)` and a `Wallet.query.filter_by(...)` on the same session *before* the
+Trade insert (`autosnipe_buy_new_token.py:521`, `:542-544`) - if that earlier activity opened the
+transaction, `created_at` got stamped with that earlier moment instead of the real insert time,
+inflating every `elapsed_sec = datetime.utcnow() - created_at` calculation downstream (the critical
+fail-safe timer's actual mechanism, added earlier today) by however long the transaction had already
+been open - matching the observed ~2.4s gap closely.
+
+Confirming evidence beyond the math: every *other* auto-timestamp column in `models.py`
+(`TradeHistory.timestamp`, `PresignedTrade.created_at`, `TradeLog.timestamp`) already uses the
+Python-side `default=datetime.utcnow` instead of a server-side default - `Trade.created_at` was the
+one inconsistent column using `db.func.now()`.
+
+Fix: changed `Trade.created_at` to `default=datetime.utcnow`, matching every sibling timestamp
+column - SQLAlchemy now computes the timestamp in Python at flush time and embeds the literal value
+in the INSERT, which is immune to Postgres's transaction-start semantics entirely. No schema change
+or migration needed (column type is unchanged; only how new rows' default value is computed
+changes) - confirmed `main.py` has no raw SQL referencing `created_at` that would need updating.
+386/386 passing after the change.
+
 ======================================================================
 ## PROPOSED WORKING ORDER (today)
 ======================================================================

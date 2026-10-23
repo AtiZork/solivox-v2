@@ -195,7 +195,15 @@ class Trade(db.Model):
     token_name = db.Column(db.String(100), nullable=True)
     token_symbol = db.Column(db.String(500), nullable=True)
     trade_type = db.Column(db.String(255))
-    created_at = db.Column(db.DateTime, default=db.func.now())
+    # Python-side default (matches TradeHistory.timestamp/PresignedTrade.created_at
+    # below), not a server-side db.func.now(): Postgres's now() returns the
+    # enclosing TRANSACTION's start time, not the moment this row is actually
+    # inserted - _buy_token_internal runs a dedup query and a wallet lookup on
+    # the same session before the insert, so a server-side default stamped
+    # created_at a couple seconds earlier than the real buy time, which made
+    # the critical-failsafe timer (elapsed_sec = utcnow() - created_at) fire
+    # early. datetime.utcnow() is evaluated in Python at flush time instead.
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
     new_migrated_token = db.Column(db.Boolean, default=False)
     customized_configuration = db.Column(db.Boolean, default=False)
     purchased_token_amount = db.Column(db.Float, default=0.0)
