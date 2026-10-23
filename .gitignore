@@ -23,3 +23,8 @@ temp_auto_push.bat
 temp_interactive_push.bat
 .gitignore
 branch_structure.json
+
+# Local Claude Code engineering scaffold - stays on this machine, never pushed
+.claude/
+CLAUDE.md
+docs/engineering/

@@ -1,15 +1,13 @@
-"""Unit tests for yellowstone_pricing (mocked gRPC — no live Yellowstone endpoint)."""
+"""Unit tests for yellowstone_pricing (mocked yellowstone_cache - no live Yellowstone endpoint)."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import grpc
 import pytest
 
 import yellowstone_pricing as yp
 from shyft_pricing import ShyftPricingService
-from yellowstone_grpc.generated import geyser_pb2
 
 PUMP_MINT = "6BFPDdf7VdkFdzePjWzVENzgigzs1DJmZJhKtjiTpump"
 
@@ -22,32 +20,35 @@ def _bonding_raw(vt: int = 1_000_000_000_000, vs: int = 30_000_000_000, complete
     return bytes(raw)
 
 
-def _account_update(data: bytes) -> geyser_pb2.SubscribeUpdate:
-    update = geyser_pb2.SubscribeUpdate()
-    update.account.account.pubkey = b"\x00" * 32
-    update.account.account.data = data
-    update.account.slot = 1
-    return update
-
-
 @pytest.fixture(autouse=True)
 def _enabled(monkeypatch):
     """Most tests want USE_GEYSER enabled with a fake endpoint."""
     monkeypatch.setattr(yp, "USE_GEYSER", True)
     monkeypatch.setattr(yp, "GEYSER_GRPC_URL", "127.0.0.1:10000")
-    monkeypatch.setattr(yp, "GEYSER_GRPC_TOKEN", "")
-    monkeypatch.setattr(yp, "GEYSER_USE_TLS", False)
-    monkeypatch.setattr(yp, "GEYSER_PRICE_TIMEOUT_SEC", 1.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_cache_by_default(monkeypatch):
+    """
+    yellowstone_cache starts "empty" for every test unless a test explicitly
+    overrides these - keeps each test's cache-hit/cache-miss behavior
+    explicit rather than depending on real module-level cache state (which
+    would otherwise leak between tests sharing PUMP_MINT).
+    """
+    monkeypatch.setattr(yp, "get_cached_curve_raw", lambda pda: None)
+    monkeypatch.setattr(yp, "get_cached_pool_metadata", lambda mint: None)
+    monkeypatch.setattr(yp, "set_cached_curve_raw", lambda pda, raw: None)
 
 
 @pytest.fixture
 def shared_service(monkeypatch):
     """
     Mock the shared ShyftPricingService singleton used for the pre-subscribe
-    migration check, SOL/USD conversion, and the PumpSwap fallback.
-    Defaults to "not migrated" / sol_usd=200.0 so existing bonding-curve-path
-    tests don't need to know about the migration pre-check at all; tests that
-    care can override svc.is_bonding_curve_migrated / svc.get_pumpswap_pool_price.
+    migration check, SOL/USD conversion, the PumpSwap fallback, and (new) the
+    RPC-seed-on-cache-miss read. Defaults to "not migrated" / sol_usd=200.0
+    so existing bonding-curve-path tests don't need to know about the
+    migration pre-check at all; tests that care can override
+    svc.is_bonding_curve_migrated / svc.get_pumpswap_pool_price / svc._get_account_bytes.
     """
     svc = MagicMock()
     svc.is_bonding_curve_migrated.return_value = False
@@ -82,7 +83,7 @@ def test_valid_price_response(shared_service):
 
     fetch.assert_called_once()
     assert result["mint"] == PUMP_MINT
-    assert result["source"] == "yellowstone_grpc_accountSubscribe"
+    assert result["source"] == "yellowstone_grpc_cached"
     assert result["sol_price_usd"] == pytest.approx(200.0)
     expected_usd = ShyftPricingService._price_sol_from_bonding_raw(raw) * 200.0
     assert result["usd_price"] == pytest.approx(expected_usd)
@@ -98,7 +99,7 @@ def test_invalid_zero_price_raises(shared_service):
 
 
 def test_already_migrated_skips_subscribe_and_uses_pumpswap(shared_service):
-    """Pre-check catches an already-migrated curve without wasting the subscribe timeout."""
+    """Pre-check catches an already-migrated curve without touching the curve cache at all."""
     shared_service.is_bonding_curve_migrated.return_value = True
     shared_service.get_pumpswap_pool_price.return_value = {
         "mint": PUMP_MINT,
@@ -112,14 +113,39 @@ def test_already_migrated_skips_subscribe_and_uses_pumpswap(shared_service):
     with patch.object(yp, "_fetch_bonding_curve_account") as fetch:
         result = yp.get_yellowstone_price(PUMP_MINT)
 
-    fetch.assert_not_called()  # never opened a subscription for an already-dead curve
-    shared_service.get_pumpswap_pool_price.assert_called_once_with(PUMP_MINT)
+    fetch.assert_not_called()  # never touched the curve cache/RPC for an already-dead curve
+    shared_service.get_pumpswap_pool_price.assert_called_once_with(PUMP_MINT, cached_pool_metadata=None)
     assert result["source"] == "shyft_rpc_pumpswap_pool"
     assert result["usdPrice"] == pytest.approx(0.003)
 
 
+def test_already_migrated_uses_cached_pool_metadata_when_available(shared_service):
+    """When yellowstone_cache already has this mint's pool, it's passed straight through -
+    this is what actually closes the real "no PumpSwap pool found" gap."""
+    shared_service.is_bonding_curve_migrated.return_value = True
+    shared_service.get_pumpswap_pool_price.return_value = {
+        "mint": PUMP_MINT, "bonding_curve": None, "pumpswap_pool": "Pool111...",
+        "price_in_sol": 0.00002, "usd_price": 0.003, "sol_price_usd": 150.0,
+        "source": "shyft_rpc_pumpswap_pool",
+    }
+    cached_pool = {
+        "pool_pubkey": "Pool1111111111111111111111111111111111111",
+        "base_mint": PUMP_MINT,
+        "quote_mint": "So11111111111111111111111111111111111111112",
+        "base_vault": "BaseVault11111111111111111111111111111111",
+        "quote_vault": "QuoteVault1111111111111111111111111111111",
+        "virtual_quote_reserves": 1_000_000_000,
+    }
+    with patch.object(yp, "get_cached_pool_metadata", lambda mint: cached_pool):
+        yp.get_yellowstone_price(PUMP_MINT)
+
+    shared_service.get_pumpswap_pool_price.assert_called_once_with(
+        PUMP_MINT, cached_pool_metadata=cached_pool
+    )
+
+
 def test_migrates_during_subscription_falls_back_to_pumpswap(shared_service):
-    """complete=true arrives mid-subscription (pre-check said not-yet-migrated) -> fall back, don't raise."""
+    """complete=true arrives from the cache (pre-check said not-yet-migrated) -> fall back, don't raise."""
     migrated = _bonding_raw(complete=True)
     shared_service.get_pumpswap_pool_price.return_value = {
         "mint": PUMP_MINT,
@@ -133,7 +159,7 @@ def test_migrates_during_subscription_falls_back_to_pumpswap(shared_service):
     with patch.object(yp, "_fetch_bonding_curve_account", return_value=migrated):
         result = yp.get_yellowstone_price(PUMP_MINT)
 
-    shared_service.get_pumpswap_pool_price.assert_called_once_with(PUMP_MINT)
+    shared_service.get_pumpswap_pool_price.assert_called_once_with(PUMP_MINT, cached_pool_metadata=None)
     assert result["source"] == "shyft_rpc_pumpswap_pool"
 
 
@@ -154,75 +180,30 @@ def test_missing_sol_usd_raises(shared_service):
             yp.get_yellowstone_price(PUMP_MINT)
 
 
-def test_stream_ends_without_account_update_raises():
-    """gRPC call succeeds but only sends non-account updates (e.g. pings)."""
-    fake_call = MagicMock()
-    fake_call.__iter__.return_value = iter([geyser_pb2.SubscribeUpdate()])  # ping-shaped, no account
-
-    with patch.object(yp, "_build_channel") as build_channel, patch(
-        "yellowstone_pricing.geyser_pb2_grpc.GeyserStub"
-    ) as stub_cls:
-        channel = MagicMock()
-        build_channel.return_value = channel
-        stub = MagicMock()
-        stub.Subscribe.return_value = fake_call
-        stub_cls.return_value = stub
-
-        with pytest.raises(yp.YellowstonePricingError):
-            yp._fetch_bonding_curve_account("SomePda111111111111111111111111", 1.0)
-
-        fake_call.cancel.assert_called_once()
-        channel.close.assert_called_once()
+# --- _fetch_bonding_curve_account itself: cache-hit / cache-miss-seeds-via-RPC ---
 
 
-def test_grpc_unavailable_raises_yellowstone_error():
-    """Simulates Yellowstone being unavailable/timing out."""
-
-    class _FakeRpcError(grpc.RpcError):
-        def code(self):
-            return grpc.StatusCode.UNAVAILABLE
-
-        def details(self):
-            return "connection refused"
-
-    def _raise(*_args, **_kwargs):
-        raise _FakeRpcError()
-
-    with patch.object(yp, "_build_channel") as build_channel, patch(
-        "yellowstone_pricing.geyser_pb2_grpc.GeyserStub"
-    ) as stub_cls:
-        channel = MagicMock()
-        build_channel.return_value = channel
-        stub = MagicMock()
-        stub.Subscribe.side_effect = _raise
-        stub_cls.return_value = stub
-
-        with pytest.raises(yp.YellowstonePricingError, match="UNAVAILABLE"):
-            yp._fetch_bonding_curve_account("SomePda111111111111111111111111", 1.0)
-
-        channel.close.assert_called_once()
-
-
-def test_fetch_returns_first_account_update_and_cancels():
-    """End-to-end (mocked transport) wiring: request -> stub.Subscribe -> first account payload."""
+def test_fetch_returns_cached_value_without_any_rpc(shared_service):
     raw = _bonding_raw()
-    fake_call = MagicMock()
-    fake_call.__iter__.return_value = iter([_account_update(raw)])
-
-    with patch.object(yp, "_build_channel") as build_channel, patch(
-        "yellowstone_pricing.geyser_pb2_grpc.GeyserStub"
-    ) as stub_cls:
-        channel = MagicMock()
-        build_channel.return_value = channel
-        stub = MagicMock()
-        stub.Subscribe.return_value = fake_call
-        stub_cls.return_value = stub
-
-        data = yp._fetch_bonding_curve_account("SomePda111111111111111111111111", 1.0)
+    with patch.object(yp, "get_cached_curve_raw", return_value=raw):
+        data = yp._fetch_bonding_curve_account("SomePda111111111111111111111111")
 
     assert data == raw
-    fake_call.cancel.assert_called_once()
-    channel.close.assert_called_once()
-    # timeout + metadata were passed through to the streaming call
-    _, kwargs = stub.Subscribe.call_args
-    assert kwargs["timeout"] == 1.0
+    shared_service._get_account_bytes.assert_not_called()
+
+
+def test_fetch_seeds_via_one_rpc_call_on_cache_miss_and_writes_it_back(shared_service):
+    raw = _bonding_raw()
+    shared_service._get_account_bytes.return_value = raw
+    with patch.object(yp, "set_cached_curve_raw") as set_cached:
+        data = yp._fetch_bonding_curve_account("SomePda111111111111111111111111")
+
+    assert data == raw
+    shared_service._get_account_bytes.assert_called_once_with("SomePda111111111111111111111111")
+    set_cached.assert_called_once_with("SomePda111111111111111111111111", raw)
+
+
+def test_fetch_raises_when_cache_miss_and_rpc_seed_also_fails(shared_service):
+    shared_service._get_account_bytes.return_value = None
+    with pytest.raises(yp.YellowstonePricingError):
+        yp._fetch_bonding_curve_account("SomePda111111111111111111111111")

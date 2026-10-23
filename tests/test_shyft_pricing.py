@@ -385,6 +385,64 @@ def test_get_pumpswap_pool_price_success(service: ShyftPricingService):
     assert price["source"] == "shyft_rpc_pumpswap_pool"
 
 
+def test_get_pumpswap_pool_price_uses_cached_metadata_and_skips_pool_lookup(service: ShyftPricingService):
+    """
+    yellowstone_cache's pool-discovery cache: when cached_pool_metadata is
+    given, find_pumpswap_pool's getProgramAccounts lookup and the pool
+    account's own getAccountInfo read must both be skipped entirely - that's
+    the whole point (closing the gap right after a migration before the new
+    pool is indexed/queryable). Only the two vault-balance RPC reads happen.
+    """
+    import base58
+
+    base_vault = base58.b58encode(bytes([7]) * 32).decode()
+    quote_vault = base58.b58encode(bytes([9]) * 32).decode()
+    cached_pool_metadata = {
+        "pool_pubkey": "PoolAddr111111111111111111111111111111111",
+        "base_mint": PUMP_MINT,
+        "quote_mint": WSOL_MINT,
+        "base_vault": base_vault,
+        "quote_vault": quote_vault,
+        "virtual_quote_reserves": 1_000_000_000,
+    }
+
+    def fake_rpc(method, params):
+        if method == "getTokenAccountBalance":
+            addr = params[0]
+            if addr == base_vault:
+                return {"value": {"amount": "1000000000000", "decimals": 6}}
+            if addr == quote_vault:
+                return {"value": {"amount": "9000000000", "decimals": 9}}
+        return None
+
+    with patch.object(service, "find_pumpswap_pool") as find_pool, patch.object(
+        service, "_get_account_bytes"
+    ) as get_bytes, patch.object(service, "_rpc", side_effect=fake_rpc), patch.object(
+        service, "get_sol_usd", return_value=150.0
+    ):
+        price = service.get_pumpswap_pool_price(PUMP_MINT, cached_pool_metadata=cached_pool_metadata)
+
+    find_pool.assert_not_called()
+    get_bytes.assert_not_called()
+    assert price["price_in_sol"] == pytest.approx(0.00001)
+    assert price["usd_price"] == pytest.approx(0.00001 * 150.0)
+    assert price["pumpswap_pool"] == cached_pool_metadata["pool_pubkey"]
+
+
+def test_get_pumpswap_pool_price_cached_metadata_still_validates_base_mint(service: ShyftPricingService):
+    """A mismatched cache entry (shouldn't happen, but must never silently misprice) still raises."""
+    cached_pool_metadata = {
+        "pool_pubkey": "PoolAddr111111111111111111111111111111111",
+        "base_mint": "SomeOtherMint1111111111111111111111111111",
+        "quote_mint": WSOL_MINT,
+        "base_vault": "BaseVault111111111111111111111111111111111",
+        "quote_vault": "QuoteVault11111111111111111111111111111111",
+        "virtual_quote_reserves": 0,
+    }
+    with pytest.raises(ShyftPricingError, match="mismatch"):
+        service.get_pumpswap_pool_price(PUMP_MINT, cached_pool_metadata=cached_pool_metadata)
+
+
 def test_get_pumpswap_pool_price_usdc_quote_needs_no_sol_conversion(service: ShyftPricingService):
     """
     A pool quoted in USDC is already USD-denominated - usd_price should equal

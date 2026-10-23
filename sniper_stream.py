@@ -36,6 +36,7 @@ from settings import (
     solana_client,
 )
 from latency_log import StageStats
+from shyft_pricing import ShyftPricingService
 
 logger = logging.getLogger(__name__)
 rpc_stats = StageStats("sniper")
@@ -372,11 +373,32 @@ def _account_key_str(key) -> str:
 
 
 def _mint_from_tx_value(tx) -> Optional[str]:
+    """
+    Resolve the mint created by this transaction.
+
+    The "pump" suffix (checked first, cheap) is just a branding convention
+    from how Pump.fun's own deployer grinds vanity addresses - most launches
+    have it, but it is not a protocol requirement, and a token created
+    without it is a completely legitimate Pump.fun token that this suffix
+    check alone would silently never detect, buy, or even log (confirmed:
+    every account in the transaction would be skipped, same as the fast
+    log-scanning path in _extract_pump_mints_from_logs, so the token simply
+    never appears anywhere).
+
+    Fallback for that case: the bonding curve PDA is deterministically
+    derived from the mint by Pump.fun's own program
+    (ShyftPricingService.bonding_curve_pda) - this relationship holds for
+    every Create transaction regardless of the mint's address pattern or its
+    position in the account list. Whichever account, when used to derive
+    that PDA, produces ANOTHER account already present in this same
+    transaction, is the mint - a self-validating check against the actual
+    on-chain structure, not a new unverified assumption.
+    """
     if tx is None:
         return None
     account_keys = tx.transaction.transaction.message.account_keys
-    for key in account_keys:
-        addr = _account_key_str(key)
+    addrs = [_account_key_str(key) for key in account_keys]
+    for addr in addrs:
         if addr.endswith("pump"):
             return addr
     meta = tx.transaction.meta
@@ -385,6 +407,14 @@ def _mint_from_tx_value(tx) -> Optional[str]:
             mint = str(bal.mint)
             if mint.endswith("pump"):
                 return mint
+    addr_set = set(addrs)
+    for addr in addrs:
+        try:
+            curve = str(ShyftPricingService.bonding_curve_pda(addr))
+        except Exception:
+            continue
+        if curve in addr_set:
+            return addr
     return None
 
 
