@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Log Analysis - Solivox</title>
+  <!-- Project vendor CSS (restore to get same styling) -->
+  <link rel="stylesheet" href=".././static/vendor/vendor/jqvmap/css/jqvmap.min.css">
+  <link rel="stylesheet" href=".././static/vendor/vendor/chartist/css/chartist.min.css">
+  <link rel="stylesheet" href=".././static/vendor/vendor/bootstrap-select/dist/css/bootstrap-select.min.css">
+  <link rel="stylesheet" href=".././static/vendor/vendor/owl-carousel/owl.carousel.css">
+  <link rel="stylesheet" href=".././static/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+  <style>
+    /* minimal safe overrides to ensure layout if some vendor files 404 */
+    body { background: #f4f4f6; }
+    .content-body { padding: 24px; }
+    .compact-header { display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px; margin-top: 32px; }
+    .log-finding-card { border-left: 4px solid #ccc; margin-bottom: 14px; }
+    .log-finding-card.severity-error { border-left-color: #d9534f; }
+    .log-finding-card.severity-warning { border-left-color: #f0ad4e; }
+    .log-finding-card.severity-info { border-left-color: #5bc0de; }
+    .log-evidence { background: #1e1e2d; color: #e6e6e6; font-family: monospace; font-size: 12px;
+                     padding: 10px; border-radius: 6px; margin-top: 8px; white-space: pre-wrap;
+                     word-break: break-word; max-height: 220px; overflow-y: auto; }
+    .severity-badge-error { background: #d9534f; }
+    .severity-badge-warning { background: #f0ad4e; color: #222; }
+    .severity-badge-info { background: #5bc0de; color: #222; }
+  </style>
+</head>
+<body>
+  <!-- Nav header (kept minimal but using project classes) -->
+  <div id="main-wrapper">
+    <div class="nav-header">
+      <a href="/" class="brand-logo">
+        <h1 class="brand-title">Solivox</h1>
+      </a>
+      <div class="nav-control">
+        <div class="hamburger"><span class="line"></span><span class="line"></span><span class="line"></span></div>
+      </div>
+    </div>
+
+    <!-- Sidebar (restore basic project sidebar structure) -->
+    <div class="deznav">
+      <div class="deznav-scroll">
+        <ul class="metismenu" id="menu">
+          <li>
+            <ul aria-expanded="false">
+              <li><a href="/">Home</a></li>
+              <li><a href="/pending-trades">Pending Trades</a></li>
+              <li><a href="/dashboard">Dashboard</a></li>
+              <li><a href="/auto-snipe">AutoSnipe</a></li>
+              <li><a href="/my-wallets">My Wallets</a></li>
+              <li><a href="/transactions">Order History</a></li>
+              <li><a href="/performance">Performance</a></li>
+              <li><a href="/logs">Logs</a></li>
+              <li><a href="/log-analysis" class="mm-active">Log Analysis</a></li>
+            </ul>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Content body -->
+    <div class="content-body">
+      <div class="container-fluid">
+        <div class="compact-header">
+          <h3 class="mb-0">Log Analysis</h3>
+          <div>
+            <select id="log-hours-select" class="form-select form-select-sm d-inline-block" style="width:auto;">
+              <option value="12">Last 12 hours</option>
+              <option value="24" selected>Last 24 hours</option>
+            </select>
+            <button id="analyze-logs-btn" class="btn btn-primary btn-sm ms-2">Analyze Logs</button>
+          </div>
+        </div>
+
+        <div id="log-analysis-status" class="text-muted mb-3"></div>
+        <div id="log-analysis-error" class="alert alert-warning d-none"></div>
+        <div id="log-analysis-clean" class="alert alert-success d-none">
+          No issues detected in the analyzed window.
+        </div>
+        <div id="log-analysis-results"></div>
+      </div>
+    </div>
+
+    <!-- Sidebar toggle behavior: keep same behavior as every other page -->
+    <script>
+      document.addEventListener('DOMContentLoaded', function () {
+        try {
+          const hamburger = document.querySelector('.hamburger');
+          const sidebar = document.querySelector('.deznav');
+          const contentBody = document.querySelector('.content-body');
+          if (!hamburger || !sidebar || !contentBody) return;
+
+          function setLayoutForSidebarHidden(hidden) {
+            if (hidden) {
+              sidebar.classList.add('d-none');
+              contentBody.style.marginLeft = '2rem';
+            } else {
+              sidebar.classList.remove('d-none');
+              contentBody.style.marginLeft = '21rem';
+            }
+          }
+
+          setLayoutForSidebarHidden(sidebar.classList.contains('d-none'));
+
+          hamburger.addEventListener('click', function () {
+            const hidden = sidebar.classList.toggle('d-none');
+            setLayoutForSidebarHidden(hidden);
+          });
+        } catch (e) {
+          console.error('Sidebar toggle init error', e);
+        }
+      });
+    </script>
+
+    <!-- Scripts (rehydrate project scripts; non-existing files may 404 but styling will be loaded above) -->
+    <script src="https://code.jquery.com/jquery-3.6.4.min.js"></script>
+    <script src=".././static/vendor/vendor/global/global.min.js"></script>
+    <script src=".././static/js/js/custom.min.js"></script>
+    <script src="/static/js/js/log_analysis.js"></script>
+
+  </div>
+</div>
+</body>
+</html>

@@ -35,6 +35,7 @@ from settings import (
     get_solana_ws_urls,
     solana_client,
 )
+from autosnipe_buy_logic import usd_value_in_range
 from latency_log import StageStats
 from shyft_pricing import ShyftPricingService
 
@@ -198,7 +199,7 @@ class SniperStreamState:
             tracker = self.mint_registry.get(mint)
             return tracker is not None and tracker.candidates_seen >= ceiling
 
-    def get_buy_stats(self, mint: str, min_usd_value: float) -> dict:
+    def get_buy_stats(self, mint: str, min_usd_value: float, max_usd_value: float = None) -> dict:
         with self._lock:
             tracker = self.mint_registry.get(mint)
             if tracker is None:
@@ -210,7 +211,10 @@ class SniperStreamState:
                     "candidates_seen": 0,
                     "candidates_excluded": 0,
                 }
-            qualifying = [b for b in tracker.buys if b.usd_value >= min_usd_value]
+            qualifying = [
+                b for b in tracker.buys
+                if usd_value_in_range(b.usd_value, min_usd_value, max_usd_value)
+            ]
             return {
                 "total_buys": len(tracker.buys),
                 "qualifying_count": len(qualifying),
@@ -858,8 +862,8 @@ def wait_for_connection(timeout_sec: float = 15.0) -> bool:
     return stream_state.connected
 
 
-def get_mint_buy_stats(mint: str, min_usd_value: float) -> dict:
-    return stream_state.get_buy_stats(mint, min_usd_value)
+def get_mint_buy_stats(mint: str, min_usd_value: float, max_usd_value: float = None) -> dict:
+    return stream_state.get_buy_stats(mint, min_usd_value, max_usd_value)
 
 
 def is_ws_active() -> bool:

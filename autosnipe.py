@@ -51,6 +51,9 @@ _RANGE_FIELDS = {
     # 0 would mean "every new token instantly passes the buy-count filter".
     'min_txns': (1, 1000),
     'buy_txns_over_80_usd': (0, 100_000),
+    # Optional ceiling - see AutoSnipeConfig.buy_txns_max_usd. Cross-field
+    # (must be >= buy_txns_over_80_usd) check is separate, below.
+    'buy_txns_max_usd': (0, 100_000),
     'launch_delay': (0, 300),
     # Upper bound is a fat-finger guard (a typo like 100 SOL instead of 1),
     # not a strategy limit - must be > 0 so the bot can't "buy" nothing.
@@ -80,12 +83,12 @@ _EXCLUSIVE_MIN_FIELDS = {'buy_amount', 'slippage'}
 
 def _validate_config_payload(data):
     """Validate incoming payload for autosnipe create/update. Returns list of errors."""
-    from autosnipe_buy_logic import validate_half_txns_scan_duration
+    from autosnipe_buy_logic import validate_buy_amount_range, validate_half_txns_scan_duration
 
     errors = []
     # numeric checks
     numeric_fields = [
-        'buy_txns_over_80_usd', 'min_txns', 'launch_delay', 'buy_amount',
+        'buy_txns_over_80_usd', 'buy_txns_max_usd', 'min_txns', 'launch_delay', 'buy_amount',
         'slippage', 'priority_fee', 'sell_priority_fee', 'half_txns_scan_duration',
     ]
     parsed = {}
@@ -112,6 +115,30 @@ def _validate_config_payload(data):
         too_low = value <= lo if f in _EXCLUSIVE_MIN_FIELDS else value < lo
         if too_low or value > hi:
             errors.append(f"{f} must be between {lo} and {hi}")
+
+    # buy_txns_max_usd is mandatory (client requirement, reversed from the
+    # original optional/unbounded-by-default design): any payload that
+    # touches the buy-amount range at all - setting the min, or touching the
+    # max field itself (including trying to clear it back to blank) - must
+    # end up with a real max value. A payload that doesn't touch either
+    # field (e.g. a save only changing sell-side settings) is unaffected.
+    if 'buy_txns_over_80_usd' in data or 'buy_txns_max_usd' in data:
+        raw_max = data.get('buy_txns_max_usd')
+        if raw_max in (None, ''):
+            errors.append(
+                "buy_txns_max_usd is required - maximum transaction amount must be set"
+            )
+
+    # Only meaningful when both bounds are present in *this* payload - a
+    # request only touching one of the two fields has no reliable way to
+    # cross-check against the other's already-saved value here.
+    if 'buy_txns_over_80_usd' in data and 'buy_txns_max_usd' in data:
+        errors.extend(
+            validate_buy_amount_range(
+                data.get('buy_txns_over_80_usd'),
+                data.get('buy_txns_max_usd'),
+            )
+        )
 
     half_enabled = False
     if 'half_txns_scan_enabled' in data:
@@ -198,6 +225,9 @@ def autosnipe():
         # Direct assign assuming correct types from frontend (coerce where reasonable)
         if 'buy_txns_over_80_usd' in data:
             config.buy_txns_over_80_usd = int(data.get('buy_txns_over_80_usd'))
+        if 'buy_txns_max_usd' in data:
+            raw_max = data.get('buy_txns_max_usd')
+            config.buy_txns_max_usd = float(raw_max) if raw_max not in (None, '') else None
         if 'min_txns' in data:
             config.min_txns = int(data.get('min_txns'))
         if 'launch_delay' in data:
@@ -272,6 +302,7 @@ def list_autosnipers():
                         'active': bool(row.get('active')) if 'active' in row else True,
                         'wallet_id': row.get('wallet_id'),
                         'buy_txns_over_80_usd': row.get('buy_txns_over_80_usd', 80),
+                        'buy_txns_max_usd': row.get('buy_txns_max_usd'),
                         'min_txns': row.get('min_txns', 5),
                         'launch_delay': row.get('launch_delay', 5),
                         'half_txns_scan_enabled': bool(row.get('half_txns_scan_enabled')) if 'half_txns_scan_enabled' in row else False,
@@ -329,6 +360,7 @@ def get_autosnipe():
                 "active": config.active,
                 "wallet_id": config.wallet_id,
                 "buy_txns_over_80_usd": config.buy_txns_over_80_usd,
+                "buy_txns_max_usd": getattr(config, "buy_txns_max_usd", None),
                 "min_txns": config.min_txns,
                 "launch_delay": config.launch_delay,
                 "half_txns_scan_enabled": bool(getattr(config, "half_txns_scan_enabled", False)),
@@ -381,6 +413,7 @@ def get_autosnipe():
                     'active': bool(r.get('active')) if 'active' in r else True,
                     'wallet_id': r.get('wallet_id'),
                     'buy_txns_over_80_usd': r.get('buy_txns_over_80_usd', 80),
+                    'buy_txns_max_usd': r.get('buy_txns_max_usd'),
                     'min_txns': r.get('min_txns', 5),
                     'launch_delay': r.get('launch_delay', 5),
                     'half_txns_scan_enabled': bool(r.get('half_txns_scan_enabled')) if 'half_txns_scan_enabled' in r else False,
@@ -454,6 +487,12 @@ def update_autosnipe(config_id):
                     setattr(config, f, float(data.get(f)))
                 except Exception:
                     pass
+        if 'buy_txns_max_usd' in data:
+            raw_max = data.get('buy_txns_max_usd')
+            try:
+                config.buy_txns_max_usd = float(raw_max) if raw_max not in (None, '') else None
+            except Exception:
+                pass
         if 'half_txns_scan_enabled' in data:
             config.half_txns_scan_enabled = _parse_bool(data.get('half_txns_scan_enabled'), False)
         if 'half_txns_scan_duration' in data and data.get('half_txns_scan_duration') is not None:

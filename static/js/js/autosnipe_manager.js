@@ -46,7 +46,7 @@ function createCardElement(sniper) {
       <div class="card-header d-flex justify-content-between align-items-center">
         <div>
           <strong>Sniper #${sniper.id}</strong>
-          <div class="small text-muted">Buy Txns ≥ $${sniper.buy_txns_over_80_usd || ''} • Min Txns: ${sniper.min_txns || ''}</div>
+          <div class="small text-muted">Buy Txns ${sniper.buy_txns_max_usd != null ? `$${sniper.buy_txns_over_80_usd || ''}-$${sniper.buy_txns_max_usd}` : `≥ $${sniper.buy_txns_over_80_usd || ''}`} • Min Txns: ${sniper.min_txns || ''}</div>
         </div>
         <div>
           <button class="btn btn-sm btn-outline-secondary edit-sniper-btn" data-id="${sniper.id}"><i class="fa fa-edit"></i></button>
@@ -142,6 +142,7 @@ function openModalWithData(sniper) {
   // populate
   const idField = document.getElementById('modal_autosniper_id');
   const buyTxnsField = document.getElementById('modal_buy_txns_over_80_usd');
+  const buyTxnsMaxField = document.getElementById('modal_buy_txns_max_usd');
   const minTxnsField = document.getElementById('modal_min_txns');
   const launchDelayField = document.getElementById('modal_launch_delay');
   const buyAmountField = document.getElementById('modal_buy_amount');
@@ -171,6 +172,7 @@ function openModalWithData(sniper) {
   if (idField) idField.value = sniper.id || '';
   if (walletField) walletField.value = sniper.wallet_id ? String(sniper.wallet_id) : '';
   if (buyTxnsField) buyTxnsField.value = sniper.buy_txns_over_80_usd ?? 80;
+  if (buyTxnsMaxField) buyTxnsMaxField.value = sniper.buy_txns_max_usd ?? '';
   if (minTxnsField) minTxnsField.value = sniper.min_txns ?? 5;
   if (launchDelayField) launchDelayField.value = sniper.launch_delay ?? 5;
   if (buyAmountField) buyAmountField.value = sniper.buy_amount ?? 1;
@@ -230,6 +232,7 @@ function openModalWithData(sniper) {
 function clearModal() {
   const idField = document.getElementById('modal_autosniper_id');
   const buyTxnsField = document.getElementById('modal_buy_txns_over_80_usd');
+  const buyTxnsMaxFieldClear = document.getElementById('modal_buy_txns_max_usd');
   const minTxnsField = document.getElementById('modal_min_txns');
   const launchDelayField = document.getElementById('modal_launch_delay');
   const buyAmountField = document.getElementById('modal_buy_amount');
@@ -258,6 +261,7 @@ function clearModal() {
   if (idField) idField.value = '';
   if (walletFieldClear) walletFieldClear.value = '';
   if (buyTxnsField) buyTxnsField.value = 80;
+  if (buyTxnsMaxFieldClear) buyTxnsMaxFieldClear.value = '';
   if (minTxnsField) minTxnsField.value = 5;
   if (launchDelayField) launchDelayField.value = 5;
   if (buyAmountField) buyAmountField.value = 1;
@@ -313,6 +317,15 @@ function intFieldValue(id, fallback) {
   const v = parseInt(document.getElementById(id)?.value, 10);
   return Number.isNaN(v) ? fallback : v;
 }
+// For fields where "blank" is a real, meaningful value (no upper limit),
+// not something to replace with a default - returns null instead of a
+// fallback number, matching how the backend treats buy_txns_max_usd=null.
+function optionalNumFieldValue(id) {
+  const raw = document.getElementById(id)?.value;
+  if (raw === '' || raw === undefined || raw === null) return null;
+  const v = parseFloat(raw);
+  return Number.isNaN(v) ? null : v;
+}
 
 async function onModalSave(e) {
   e.preventDefault();
@@ -322,6 +335,7 @@ async function onModalSave(e) {
   const payload = {
     wallet_id: walletIdRaw ? parseInt(walletIdRaw) : null,
     buy_txns_over_80_usd: numFieldValue('modal_buy_txns_over_80_usd', 80),
+    buy_txns_max_usd: optionalNumFieldValue('modal_buy_txns_max_usd'),
     min_txns: intFieldValue('modal_min_txns', 5),
     launch_delay: intFieldValue('modal_launch_delay', 5),
     half_txns_scan_enabled: !!document.getElementById('modal_half_txns_scan_enabled')?.checked,

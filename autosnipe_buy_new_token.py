@@ -214,12 +214,14 @@ def get_token_transactions(token_address: str, limit: int) -> list[dict]:
         print(f"[Tx Fetcher] Error fetching signatures for {token_address}: {e}")
         return []
 
-def get_token_specific_transactions(token_address, min_required, min_usd_value):
+def get_token_specific_transactions(token_address, min_required, min_usd_value, max_usd_value=None):
     """
     Fetches recent transactions for a given token mint address.
-    Returns only those where the USD value meets or exceeds the threshold.
+    Returns only those within [min_usd_value, max_usd_value] (max_usd_value=None
+    means no ceiling, matching the historical floor-only behavior).
     Continues fetching until min_required qualifying transactions are collected.
     """
+    from autosnipe_buy_logic import usd_value_in_range
     txs_data = []
     seen_signatures = set()
     before = None  # for pagination
@@ -277,7 +279,7 @@ def get_token_specific_transactions(token_address, min_required, min_usd_value):
                         # amount = 1.0  # default fallback
 
                     usd_value = price_usd_func({'amount': amount, 'token_address': token_address})
-                    if usd_value >= min_usd_value:
+                    if usd_value_in_range(usd_value, min_usd_value, max_usd_value):
                         txs_data.append({
                             'amount': amount,
                             'usd_value': usd_value,
@@ -335,6 +337,7 @@ def should_buy_token(token_address, user_id, config):
     from autosnipe_buy_logic import (
         extended_scan_deadline,
         should_start_half_txn_extended_scan,
+        usd_value_in_range,
     )
 
     # config = AutoSnipeConfig.query.filter_by(user_id=user_id, active=True).first()
@@ -345,9 +348,16 @@ def should_buy_token(token_address, user_id, config):
     check_duration = config.launch_delay  # seconds
     half_enabled = bool(getattr(config, "half_txns_scan_enabled", False))
     half_duration = getattr(config, "half_txns_scan_duration", 30) or 30
+    # None (default/unset) = no ceiling, identical to today's floor-only behavior.
+    max_usd_value = getattr(config, "buy_txns_max_usd", None)
+    range_label = (
+        f"${config.buy_txns_over_80_usd}-${max_usd_value}"
+        if max_usd_value is not None
+        else f">=${config.buy_txns_over_80_usd}"
+    )
     print(
         f"  [Buy Condition] Checking buy conditions for {token_address} for user {user_id} "
-        f"for max {check_duration} seconds..."
+        f"for max {check_duration} seconds (qualifying range {range_label})..."
     )
 
     def _maybe_extend(start_time, qualifying, path_label: str):
@@ -381,16 +391,16 @@ def should_buy_token(token_address, user_id, config):
             last_qualifying = 0
             stats = {}  # guards the NOT-MET log line below if check_duration <= 0
             while time.time() - start_time < check_duration:
-                stats = get_mint_buy_stats(token_address, config.buy_txns_over_80_usd)
+                stats = get_mint_buy_stats(token_address, config.buy_txns_over_80_usd, max_usd_value)
                 last_qualifying = stats["qualifying_count"]
                 print(
                     f"[Buy Condition][WS] qualifying={last_qualifying} / required={config.min_txns} "
-                    f"(total buys={stats['total_buys']})"
+                    f"(total buys={stats['total_buys']}, range={range_label})"
                 )
                 if last_qualifying >= config.min_txns:
                     print(
                         f"[Buy Condition][WS] Buy conditions MET for {token_address}: "
-                        f"{last_qualifying} transactions >= ${config.buy_txns_over_80_usd}."
+                        f"{last_qualifying} transactions in {range_label}."
                     )
                     return True
                 time.sleep(0.2)
@@ -398,7 +408,7 @@ def should_buy_token(token_address, user_id, config):
             extend_deadline = _maybe_extend(start_time, last_qualifying, "WS")
             if extend_deadline is not None:
                 while time.time() < extend_deadline:
-                    stats = get_mint_buy_stats(token_address, config.buy_txns_over_80_usd)
+                    stats = get_mint_buy_stats(token_address, config.buy_txns_over_80_usd, max_usd_value)
                     last_qualifying = stats["qualifying_count"]
                     print(
                         f"[Buy Condition][WS][Extended] qualifying={last_qualifying} / "
@@ -425,7 +435,7 @@ def should_buy_token(token_address, user_id, config):
     last_qualifying = 0
     while time.time() - start_time < check_duration:
         txns = get_token_specific_transactions(
-            token_address, config.min_txns, config.buy_txns_over_80_usd
+            token_address, config.min_txns, config.buy_txns_over_80_usd, max_usd_value
         )
         if not txns:
             time.sleep(1)
@@ -434,12 +444,12 @@ def should_buy_token(token_address, user_id, config):
         last_qualifying = 0
         for txn in txns:
             usd_value = txn['usd_value'] if txn['usd_value'] else 0.0
-            if usd_value >= config.buy_txns_over_80_usd:
+            if usd_value_in_range(usd_value, config.buy_txns_over_80_usd, max_usd_value):
                 last_qualifying += 1
         print(f"[Buy Condition][HTTP] Current qualifying transactions: {last_qualifying} / required: {config.min_txns}.")
 
         if last_qualifying >= config.min_txns:
-            print(f"[Buy Condition][HTTP] Buy conditions MET for {token_address}: {last_qualifying} transactions >= ${config.buy_txns_over_80_usd}.")
+            print(f"[Buy Condition][HTTP] Buy conditions MET for {token_address}: {last_qualifying} transactions in {range_label}.")
             return True
         time.sleep(1)
 
@@ -447,12 +457,12 @@ def should_buy_token(token_address, user_id, config):
     if extend_deadline is not None:
         while time.time() < extend_deadline:
             txns = get_token_specific_transactions(
-                token_address, config.min_txns, config.buy_txns_over_80_usd
+                token_address, config.min_txns, config.buy_txns_over_80_usd, max_usd_value
             )
             last_qualifying = 0
             for txn in (txns or []):
                 usd_value = txn['usd_value'] if txn['usd_value'] else 0.0
-                if usd_value >= config.buy_txns_over_80_usd:
+                if usd_value_in_range(usd_value, config.buy_txns_over_80_usd, max_usd_value):
                     last_qualifying += 1
             print(
                 f"[Buy Condition][HTTP][Extended] qualifying={last_qualifying} / "

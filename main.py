@@ -19,6 +19,7 @@ from flask_socketio import SocketIO
 from trade_history import trade_history_bp
 from trades_api import trades_api_bp
 from dashboard_api import dashboard_api_bp
+from log_analysis import log_analysis_bp
 import os
 # for live
 # app = Flask(__name__, static_folder='/home/ubuntu/solivox-v2/static')
@@ -67,6 +68,7 @@ with app.app_context():
                 ("critical_failsafe_seconds", "DOUBLE PRECISION NOT NULL DEFAULT 5"),
                 ("wallet_id", "INTEGER"),
                 ("sell_priority_fee", "DOUBLE PRECISION NOT NULL DEFAULT 0.01"),
+                ("buy_txns_max_usd", "DOUBLE PRECISION"),
             ],
             "trade": [
                 ("drop_cutoff_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
@@ -201,6 +203,10 @@ def logs():
 
     return render_template('logs.html', logs=logs_data)
 
+@app.route('/log-analysis')
+def log_analysis_page():
+    return render_template('log-analysis.html')
+
 @app.route("/dashboard")
 def dashboard():
     return render_template("dashboard.html")
@@ -226,6 +232,7 @@ app.register_blueprint(autosnipe_trade_bp)
 app.register_blueprint(live_pricing_bp)
 app.register_blueprint(trades_api_bp)
 app.register_blueprint(dashboard_api_bp)
+app.register_blueprint(log_analysis_bp)
 
 # app.register_blueprint(solana_auto_snipe_bp)
 

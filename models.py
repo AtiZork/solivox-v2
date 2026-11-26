@@ -74,6 +74,16 @@ class AutoSnipeConfig(db.Model):
     wallet = db.relationship('Wallet', foreign_keys=[wallet_id])
     # New field for Buy Txns > 80 USD
     buy_txns_over_80_usd = db.Column(db.Integer, nullable=False, default=80)
+    # Ceiling alongside the floor above (client request: a variable
+    # upper/lower amount window instead of only ">$X", to stop counting the
+    # kind of oversized wash-trade buys that let scam launches pass the old
+    # floor-only check). Mandatory going forward - autosnipe.py's
+    # _validate_config_payload rejects any save that touches the buy-amount
+    # range without a real max value. Stays nullable=True at the DB level
+    # only so pre-existing rows saved before this field existed don't break -
+    # those keep reading as "no ceiling" until someone re-saves that config
+    # with a real value; nothing backfills them automatically.
+    buy_txns_max_usd = db.Column(db.Float, nullable=True, default=None)
     # Basic fields with defaults
     min_txns = db.Column(db.Integer, nullable=False, default=5)
     launch_delay = db.Column(db.Integer, nullable=False, default=5)
@@ -139,6 +149,7 @@ class AutoSnipeConfig(db.Model):
             "active": bool(self.active),
             "wallet_id": self.wallet_id,
             "buy_txns_over_80_usd": self.buy_txns_over_80_usd,
+            "buy_txns_max_usd": getattr(self, "buy_txns_max_usd", None),
             "min_txns": self.min_txns,
             "launch_delay": self.launch_delay,
             "half_txns_scan_enabled": bool(self.half_txns_scan_enabled),

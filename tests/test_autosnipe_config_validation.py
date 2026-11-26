@@ -106,3 +106,85 @@ def test_update_also_enforces_range(client, app):
         f"/api/autosnipe/{config_id}", json={"slippage": 1000}, headers=_auth(app)
     )
     assert resp.status_code == 400
+
+
+def test_buy_txns_max_usd_is_mandatory_when_setting_the_min(client, app):
+    """Client requirement (reversed from the original optional design): a
+    save that sets the min floor but omits the max ceiling must be rejected,
+    not silently accepted as "no limit"."""
+    resp = client.post("/api/autosnipe", json={"buy_txns_over_80_usd": 80}, headers=_auth(app))
+    assert resp.status_code == 400
+    assert any("buy_txns_max_usd" in e for e in resp.get_json()["errors"])
+
+
+def test_save_not_touching_buy_amount_range_is_unaffected(client, app):
+    """The mandatory check only applies when the buy-amount range is
+    actually being configured - an unrelated sell-side-only save must not
+    be blocked by a field it never touches."""
+    resp = client.post("/api/autosnipe", json={"drop_cutoff": 25}, headers=_auth(app))
+    assert resp.status_code == 200
+
+
+def test_buy_txns_max_usd_below_min_rejected(client, app):
+    resp = client.post(
+        "/api/autosnipe",
+        json={"buy_txns_over_80_usd": 100, "buy_txns_max_usd": 50},
+        headers=_auth(app),
+    )
+    assert resp.status_code == 400
+    assert any("buy_txns_max_usd" in e for e in resp.get_json()["errors"])
+
+
+def test_buy_txns_max_usd_out_of_range_rejected(client, app):
+    resp = client.post("/api/autosnipe", json={"buy_txns_max_usd": -5}, headers=_auth(app))
+    assert resp.status_code == 400
+    assert any("buy_txns_max_usd" in e for e in resp.get_json()["errors"])
+
+
+def test_buy_txns_max_usd_round_trips_through_list_endpoint(client, app):
+    """Client's two example strategies - confirms both are just plain config
+    saves once the ceiling field exists, nothing extra needed."""
+    create = client.post(
+        "/api/autosnipe",
+        json={"min_txns": 10, "buy_txns_over_80_usd": 100, "buy_txns_max_usd": 200},
+        headers=_auth(app),
+    )
+    assert create.status_code == 200
+    config_id = create.get_json()["id"]
+
+    listed = client.get("/api/autosnipe/list", headers=_auth(app)).get_json()
+    saved = next(c for c in listed if c["id"] == config_id)
+    assert saved["buy_txns_max_usd"] == pytest.approx(200)
+    assert saved["buy_txns_over_80_usd"] == 100
+    assert saved["min_txns"] == 10
+
+
+def test_buy_txns_max_usd_cannot_be_cleared_back_to_unbounded(client, app):
+    """Once mandatory, an update explicitly trying to blank it back out
+    must be rejected - "no limit" is no longer a valid configured state
+    going forward, even though pre-existing untouched rows may still have
+    it (see models.py AutoSnipeConfig.buy_txns_max_usd)."""
+    create = client.post(
+        "/api/autosnipe", json={"buy_txns_over_80_usd": 100, "buy_txns_max_usd": 200},
+        headers=_auth(app),
+    )
+    config_id = create.get_json()["id"]
+    resp = client.put(
+        f"/api/autosnipe/{config_id}", json={"buy_txns_max_usd": None}, headers=_auth(app)
+    )
+    assert resp.status_code == 400
+
+
+def test_update_rejects_max_below_min_when_both_given(client, app):
+    create = client.post(
+        "/api/autosnipe",
+        json={"buy_txns_over_80_usd": 100, "buy_txns_max_usd": 300},
+        headers=_auth(app),
+    )
+    config_id = create.get_json()["id"]
+    resp = client.put(
+        f"/api/autosnipe/{config_id}",
+        json={"buy_txns_over_80_usd": 100, "buy_txns_max_usd": 20},
+        headers=_auth(app),
+    )
+    assert resp.status_code == 400

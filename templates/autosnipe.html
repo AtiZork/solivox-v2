@@ -45,6 +45,7 @@
               <li><a href="/transactions">Order History</a></li>
               <li><a href="/performance">Performance</a></li>
               <li><a href="/logs">Logs</a></li>
+              <li><a href="/log-analysis">Log Analysis</a></li>
             </ul>
           </li>
         </ul>
@@ -94,8 +95,12 @@
                     </select>
                   </div>
                   <div class="col-md-6 mb-3">
-                    <label class="form-label">Buy Txns &gt; USD</label>
+                    <label class="form-label">Buy Amount Range - From (USD)</label>
                     <input type="number" id="modal_buy_txns_over_80_usd" class="form-control" value="80" />
+                  </div>
+                  <div class="col-md-6 mb-3">
+                    <label class="form-label">Buy Amount Range - To (USD)</label>
+                    <input type="number" id="modal_buy_txns_max_usd" class="form-control" placeholder="e.g. 150" required />
                   </div>
                   <div class="col-md-6 mb-3">
                     <label class="form-label">Minimum Buy Txns</label>
